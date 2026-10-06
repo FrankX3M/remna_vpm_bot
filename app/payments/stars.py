@@ -18,13 +18,15 @@ class StarsProvider(PaymentProvider):
         return f"{amount} ⭐"
 
     async def start(
-        self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0
+        self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
+        description: str | None = None,
     ) -> None:
         note = f" (скидка {discount}%)" if discount else ""
+        text = (description or f"Подписка VPN на {plan.days} дн.")
         await bot.send_invoice(
             chat_id=chat_id,
             title=plan.title[:32],
-            description=f"Подписка VPN на {plan.days} дн.{note}",
+            description=(text + note)[:255],
             payload=VPNService.make_payload(plan.id, redemption_id),
             currency=self.currency,
             prices=[LabeledPrice(label=plan.title[:32], amount=amount)],

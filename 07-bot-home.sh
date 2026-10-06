@@ -25,6 +25,14 @@
 #   5. docker compose build/up, затем самопроверка: Telegram через прокси, панель, токен API.
 #   6. Ждёт healthy у vpnbot.
 #
+# Новое в версии с PostgreSQL и веб-админкой:
+#   - БД бота — PostgreSQL 17 в отдельном контейнере vpnbot-postgres (пароль генерируется один раз в .env, порт наружу не публикуется).
+#     Старая SQLite-база (data/vpnbot.db) при первом запуске копируется в data/backup-sqlite-*.db и переносится в PostgreSQL,
+#     после чего переименовывается в vpnbot.db.imported-* (исходные данные не удаляются).
+#   - Веб-админка бота (порт 8088 внутри docker-сети) публикуется ТОЛЬКО так же, как панель: Caddy панели на туннельном
+#     адресе 10.66.0.2:443 получает ещё один сайт (по умолчанию bot.1rtp.ru). Публичного доступа нет; имя должно указывать
+#     на 10.66.0.2 в hosts на устройстве админа (скрипт напечатает строку). Вход — по одноразовой ссылке из команды /web.
+#
 # Использование:
 #   ./07-bot-home.sh                      # сервер в сети с VPN-роутером: режим direct определится сам
 #   ./07-bot-home.sh --vless 'vless://UUID@fin-x7.1rtp.ru:443?type=tcp&security=reality&pbk=...&sni=...&flow=xtls-rprx-vision'
@@ -46,6 +54,11 @@ APP_DIR="/opt/vpnbot"
 PANEL_CONTAINER="remnawave"
 PANEL_NETWORK="remnawave-network"
 SUB_BASE_URL="https://sub.1rtp.ru"
+WEB_DOMAIN="bot.1rtp.ru"
+WEB_PROXY="true"
+PANEL_DIR="/opt/remnawave"
+CERT_DIR="/etc/ssl/1rtp"
+TUNNEL_IP="10.66.0.2"
 VLESS_LINK=""
 FORCE_DIRECT="false"
 MODE=""
@@ -66,6 +79,9 @@ usage() {
   --panel-token T      API-токен панели (Settings -> API Tokens) (иначе спросит)
   --squads U1,U2       UUID внутренних сквадов (иначе спросит; можно пусто — но тогда нет доступа к нодам)
   --sub-url URL        Публичный адрес подписок (по умолчанию: $SUB_BASE_URL)
+  --web-domain NAME    Имя веб-админки бота (по умолчанию: $WEB_DOMAIN; должно входить в сертификат, напр. *.1rtp.ru)
+  --no-web-proxy       Не трогать Caddy панели (веб-админка останется без внешнего входа)
+  --panel-dir DIR      Каталог стека панели с Caddyfile (по умолчанию: $PANEL_DIR)
   --no-start           Только подготовить файлы, не запускать
   -h, --help
 EOF
@@ -82,6 +98,9 @@ while [[ $# -gt 0 ]]; do
     --panel-token) PANEL_TOKEN_ARG="$2"; shift 2 ;;
     --squads) SQUADS_ARG="$2"; shift 2 ;;
     --sub-url) SUB_BASE_URL="$2"; shift 2 ;;
+    --web-domain) WEB_DOMAIN="$2"; shift 2 ;;
+    --no-web-proxy) WEB_PROXY="false"; shift ;;
+    --panel-dir) PANEL_DIR="$2"; shift 2 ;;
     --no-start) NO_START="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "Неизвестный аргумент: $1"; usage; exit 1 ;;
@@ -118,7 +137,7 @@ if [[ "$(realpath "$SRC_DIR")" != "$(realpath "$APP_DIR")" ]]; then
   # код обновляем целиком, но .env, data/ и egress/config.json (секреты и состояние) не трогаем
   rm -rf "$APP_DIR/app" "$APP_DIR/tools"
   cp -a "$SRC_DIR/app" "$SRC_DIR/tools" "$APP_DIR/"
-  for f in Dockerfile .dockerignore docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_egress.py 07-bot-home.sh; do
+  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_egress.py 07-bot-home.sh; do
     [[ -f "$SRC_DIR/$f" ]] && cp -a "$SRC_DIR/$f" "$APP_DIR/$f"
   done
   find "$APP_DIR" -name __pycache__ -type d -prune -exec rm -rf {} +
@@ -193,6 +212,19 @@ for kv in "TELEGRAM_PROXY=$PROXY_VALUE" "COMPOSE_PROFILES=$PROFILE_VALUE"; do
   k="${kv%%=*}"
   if grep -q "^$k=" "$ENV_FILE"; then sed -i "s|^$k=.*|$kv|" "$ENV_FILE"; else echo "$kv" >> "$ENV_FILE"; fi
 done
+# PostgreSQL и веб-админка: секреты генерируем ОДИН раз и больше не меняем (пароль уже записан в том Postgres)
+set_env() {  # set_env KEY VALUE — задаёт только если ключа нет или он пуст
+  local k="$1" v="$2"
+  if grep -qE "^$k=.+" "$ENV_FILE"; then return 0; fi
+  if grep -q "^$k=" "$ENV_FILE"; then sed -i "s|^$k=.*|$k=$v|" "$ENV_FILE"; else echo "$k=$v" >> "$ENV_FILE"; fi
+}
+set_env PG_PASSWORD "$(openssl rand -hex 24)"
+set_env WEB_SECRET "$(openssl rand -hex 32)"
+set_env WEB_BASE_URL "https://$WEB_DOMAIN"
+set_env WEB_ENABLED "true"
+chmod 600 "$ENV_FILE"
+WEB_URL="$(grep -E '^WEB_BASE_URL=' "$ENV_FILE" | cut -d= -f2-)"
+WEB_DOMAIN="$(echo "$WEB_URL" | sed -E 's|^https?://||; s|[/:].*$||')"
 if grep -qE '^(BOT_TOKEN|REMNAWAVE_TOKEN)=(CHANGE_ME|123456:ABC\.\.\.|eyJhbGciOi\.\.\.)?$' "$ENV_FILE"; then
   err "В $ENV_FILE не заполнены BOT_TOKEN / REMNAWAVE_TOKEN. Впишите их и запустите скрипт ещё раз."
   exit 1
@@ -205,7 +237,7 @@ if [[ "$NO_START" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-step "5/6 Сборка и запуск"
+step "5/6 Сборка и запуск (PostgreSQL, бот, веб-админка)"
 # ---------------------------------------------------------------------------
 cd "$APP_DIR"
 docker compose config -q || { err "docker-compose.yml не проходит проверку."; exit 1; }
@@ -227,7 +259,35 @@ if [[ "$MODE" == "egress" ]]; then
   fi
 fi
 
-log "Самопроверка (Telegram через FIN + панель + токен)..."
+# --- PostgreSQL: поднимаем и ждём готовности, затем переносим старую SQLite-базу (один раз) -----------
+docker compose up -d postgres
+for _ in $(seq 1 30); do
+  [[ "$(docker inspect -f '{{.State.Health.Status}}' vpnbot-postgres 2>/dev/null)" == "healthy" ]] && break
+  sleep 2
+done
+[[ "$(docker inspect -f '{{.State.Health.Status}}' vpnbot-postgres 2>/dev/null)" == "healthy" ]] || { err "vpnbot-postgres не стал healthy:"; docker compose logs --tail 30 postgres || true; exit 1; }
+
+OLD_DB="$APP_DIR/data/vpnbot.db"
+if [[ -s "$OLD_DB" ]]; then
+  TS="$(date +%Y%m%d-%H%M%S)"
+  cp -a "$OLD_DB" "$APP_DIR/data/backup-sqlite-$TS.db"
+  log "Найдена старая SQLite-база. Копия: data/backup-sqlite-$TS.db. Переношу данные в PostgreSQL..."
+  set +e
+  docker compose run --rm vpnbot python -m app.sqlite_import /data/vpnbot.db
+  RC=$?
+  set -e
+  if [[ $RC -eq 0 ]]; then
+    mv -n "$OLD_DB" "$OLD_DB.imported-$TS"
+    log "Импорт завершён; старый файл переименован в vpnbot.db.imported-$TS (не удаляйте до проверки)."
+  elif [[ $RC -eq 2 ]]; then
+    warn "В PostgreSQL уже есть данные — импорт пропущен. Старый файл оставлен как есть: $OLD_DB"
+  else
+    err "Импорт SQLite -> PostgreSQL не удался (код $RC). Данные в PostgreSQL не записаны (одна транзакция), старый файл на месте."
+    exit 1
+  fi
+fi
+
+log "Самопроверка (БД + Telegram через FIN + панель + токен)..."
 if ! docker compose run --rm --no-deps vpnbot python -m app.selfcheck; then
   err "Самопроверка не пройдена. Частые причины:"
   err "  - Telegram: режим $MODE; при direct проверьте, что сервер в сети с VPN (curl -sI https://api.telegram.org), при egress: docker compose logs tg-egress"
@@ -237,6 +297,41 @@ if ! docker compose run --rm --no-deps vpnbot python -m app.selfcheck; then
 fi
 
 docker compose up -d vpnbot
+
+# --- Веб-админка: сайт в Caddy панели (только туннельный адрес) -------------------------------------------
+if [[ "$WEB_PROXY" == "true" ]]; then
+  CADDYFILE="$PANEL_DIR/Caddyfile"
+  DOM_RE="${WEB_DOMAIN//./\\.}"
+  if [[ ! -f "$CADDYFILE" ]] || ! docker ps --format '{{.Names}}' | grep -qx caddy; then
+    warn "Caddy панели не найден ($CADDYFILE / контейнер caddy) — веб-админку не публикую. Повторите запуск с --panel-dir."
+  elif grep -qE "^${DOM_RE}:443" "$CADDYFILE"; then
+    log "В Caddyfile уже есть сайт $WEB_DOMAIN — не трогаю."
+  else
+    if [[ -s "$CERT_DIR/fullchain.pem" ]] && ! openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkhost "$WEB_DOMAIN" 2>/dev/null | grep -q 'does match'; then
+      warn "Сертификат $CERT_DIR/fullchain.pem НЕ покрывает $WEB_DOMAIN — браузер покажет ошибку TLS. Выберите имя из *.1rtp.ru (--web-domain) или перевыпустите сертификат."
+    fi
+    BAK="$CADDYFILE.bak-bot-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$CADDYFILE" "$BAK"
+    cat >> "$CADDYFILE" <<CADDY_EOF
+
+# Веб-админка VPN-бота (добавлено 07-bot-home.sh). Доступна только через туннель, как панель.
+$WEB_DOMAIN:443 {
+	tls /certs/fullchain.pem /certs/privkey.pem
+	encode zstd gzip
+	reverse_proxy vpnbot:8088
+}
+CADDY_EOF
+    if docker exec caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+       && docker exec caddy caddy reload --config /etc/caddy/Caddyfile --force >/dev/null 2>&1; then
+      log "Caddy: добавлен сайт $WEB_DOMAIN -> vpnbot:8088 (слушает только $TUNNEL_IP:443)."
+    else
+      err "Caddy не принял новый Caddyfile — возвращаю прежний ($BAK)."
+      cat "$BAK" > "$CADDYFILE"          # содержимое на месте: bind-mount файла не теряется
+      docker exec caddy caddy reload --config /etc/caddy/Caddyfile --force || true
+      exit 1
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 step "6/6 Ожидание healthy"
@@ -258,8 +353,9 @@ LISTEN="$(ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -E ':1080$' || true)"
 log "Бот запущен и проверен."
 echo
 warn "Дальше:"
-warn "  1) В Telegram откройте бота, отправьте /start и /admin. Тарифы: /addplan 30 150 1 месяц"
+warn "  0) Веб-админка: на устройстве админа добавьте в hosts строку  $TUNNEL_IP $WEB_DOMAIN  (туннель AWG включён), затем отправьте боту /web — придёт одноразовая ссылка. Все параметры (пробный период, рефералы, тексты, инструкции, тарифы, промокоды) — в разделе «Настройки»."
+warn "  1) В Telegram откройте бота, отправьте /start и /admin. Тарифы можно вести в веб-админке (раздел «Тарифы»)."
 warn "  2) Зафиксируйте версии: docker compose images  ->  XRAY_TAG=... в $APP_DIR/.env"
-warn "  3) Бэкапы (этап 9): добавьте $APP_DIR/data/vpnbot.db (через sqlite3 .backup) и $APP_DIR/.env"
+warn "  3) Бэкапы (этап 9): ежедневно  docker exec vpnbot-postgres pg_dump -U vpnbot -Fc vpnbot > /var/backups/vpnbot-\$(date +%F).dump  и копия $APP_DIR/.env (в нём PG_PASSWORD и WEB_SECRET)."
 warn "  4) Мониторинг: 'docker inspect -f {{.State.Health.Status}} vpnbot' != healthy -> алерт (значит нет связи с Telegram/FIN)"
 warn "  5) Режим direct зависит от VPN на роутере: включите там kill-switch и проверяйте туннель AWG (awg show: handshake с хабом)."

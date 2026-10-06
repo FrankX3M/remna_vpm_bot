@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# JSON на SQLite (тесты) и JSONB на PostgreSQL (прод)
+JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Base(DeclarativeBase):
@@ -27,6 +32,9 @@ class User(Base):
     trial_used: Mapped[bool] = mapped_column(Boolean, default=False)
     referrer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Откуда пришёл: organic | ref (реф-ссылка) | promo (первое касание — промокод до первой покупки)
+    source: Mapped[str] = mapped_column(String(16), default="organic", server_default="organic")
+    source_promo_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -73,6 +81,9 @@ class Payment(Base):
     days: Mapped[int] = mapped_column(Integer)
     external_id: Mapped[str] = mapped_column(String(255))
     granted: Mapped[bool] = mapped_column(Boolean, default=False)  # подписка реально выдана
+    list_amount: Mapped[int | None] = mapped_column(Integer)           # цена тарифа до скидки (на момент оплаты)
+    discount_percent: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    promo_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -106,8 +117,79 @@ class PromoRedemption(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Event(Base):
+    """Журнал событий (append-only): источник правды для аналитики."""
+
+    __tablename__ = "events"
+    __table_args__ = (Index("ix_events_type_ts", "type", "ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    # registered | subscription_granted | promo_redeemed | discount_cancelled | payment_granted | payment_failed
+    # | link_revoked | user_deleted_panel | trial_started | referral_bonus ...
+    type: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str | None] = mapped_column(String(24))      # для subscription_granted: trial|payment|promo|referral|admin
+    days: Mapped[int | None] = mapped_column(Integer)
+    expire_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    promo_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
+    payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id"))
+    actor: Mapped[str] = mapped_column(String(32), default="system")   # system | user | admin:<tg_id>
+    data: Mapped[dict | None] = mapped_column(JsonType)
+
+
+class SubscriptionState(Base):
+    """Локальный снимок срока подписки (истина — в панели; обновляется при выдаче и фоновой синхронизацией)."""
+
+    __tablename__ = "subscription_state"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    expire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str | None] = mapped_column(String(16))
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SettingRow(Base):
+    """Настройки, которые админ меняет в веб-панели. Нет строки — действует значение по умолчанию."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[object] = mapped_column(JsonType)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_by: Mapped[str | None] = mapped_column(String(32))
+
+
+class AdminAudit(Base):
+    """Кто из админов что менял (веб-панель и команды бота)."""
+
+    __tablename__ = "admin_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    admin_tg_id: Mapped[int | None] = mapped_column(BigInteger)
+    via: Mapped[str] = mapped_column(String(8), default="web")   # web | bot
+    action: Mapped[str] = mapped_column(String(48))
+    target: Mapped[str | None] = mapped_column(String(128))
+    details: Mapped[dict | None] = mapped_column(JsonType)
+
+
+class WebLoginToken(Base):
+    """Одноразовые ссылки входа в веб-панель (хранится только хеш)."""
+
+    __tablename__ = "web_login_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    admin_tg_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 def make_engine(url: str):
-    engine = create_async_engine(url)
+    kwargs = {} if url.startswith("sqlite") else {"pool_pre_ping": True, "pool_size": 5, "max_overflow": 5}
+    engine = create_async_engine(url, **kwargs)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 

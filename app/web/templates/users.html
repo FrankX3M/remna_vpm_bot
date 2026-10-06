@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block title %}Пользователи{% endblock %}
+{% block body %}
+<h1>Пользователи</h1>
+<form method="get" class="card"><div class="row">
+<div><label>Поиск (Telegram ID или @username)</label><input type="search" name="q" value="{{ q }}"></div>
+<div><label>Фильтр</label><select name="flt">{% for k, t in filters.items() %}<option value="{{ k }}" {{ 'selected' if k == flt }}>{{ t }}</option>{% endfor %}</select></div>
+<div class="fit"><button>Найти</button></div></div></form>
+<div class="card"><p class="mut">Найдено: {{ page.total }}</p><div class="scroll"><table>
+<tr><th>Telegram</th><th>Источник</th><th>Подписка</th><th>Платежей</th><th>Регистрация</th></tr>
+{% for r in page['items'] %}{% set u = r.user %}<tr>
+<td><a href="/users/{{ u.telegram_id }}">{{ '@' ~ u.tg_username if u.tg_username else u.telegram_id }}</a> <span class="mut">{{ u.telegram_id }}</span></td>
+<td>{{ sources.get(u.source, u.source) }}</td>
+<td>{% if r.expire_at %}до {{ r.expire_at|date }} {% if r.status == 'active' %}<span class="tag ok">активна</span>{% else %}<span class="tag er">{{ r.status or 'истекла' }}</span>{% endif %}{% else %}<span class="mut">—</span>{% endif %}</td>
+<td>{{ r.paid }}</td><td>{{ u.created_at|date }}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">Никого не найдено.</td></tr>{% endfor %}</table></div>
+{% include "_pager.html" %}</div>
+{% endblock %}

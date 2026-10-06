@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block title %}Доступ{% endblock %}
+{% block body %}<div class="card" style="max-width:520px;margin:60px auto"><h1>Админка VPN-бота</h1><p>{{ text }}</p>
+{% if not admin %}<p class="mut">Вход — только по одноразовой ссылке: отправьте боту команду <code>/web</code>.</p>{% else %}<p><a href="/">На главную</a></p>{% endif %}</div>{% endblock %}

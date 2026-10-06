@@ -1,9 +1,14 @@
 """Проверка бизнес-логики без Telegram и без панели: python smoke_test.py"""
 import asyncio
+import os
 import uuid as uuidlib
 from datetime import timedelta
 
+from sqlalchemy import text
+
 from app.config import Settings
+from app.migrate import run_migrations
+from app.settings_store import SettingsStore
 from app.db import init_db, make_engine, utcnow
 from app.remnawave import RemnawaveError
 from app.services import VPNError, VPNService, apply_discount
@@ -172,12 +177,103 @@ async def promo_tests(svc, remna, plan):
     print("✓ админ-операции и защита от перебора")
 
 
+async def extra_tests(svc, store, remna, plan, sm):
+    from sqlalchemy import func, select
+    from app import analytics
+    from app.db import Event, User, AdminAudit
+
+    # --- настройки: валидация, применение «на лету», сброс
+    errs = await store.update({"trial_days": "0"}, "t"); assert "trial_days" in errs
+    errs = await store.update({"welcome_text": "<b>не закрыт"}, "t"); assert "welcome_text" in errs
+    assert not await store.update({"trial_days": "7"}, "t") and store.get("trial_days") == 7
+    await svc.register(900, "trialist")
+    await svc.claim_trial(900)
+    u = await svc.get_user(900)
+    assert 6.9 < days_left(remna, u.remna_uuid) < 7.1
+    print("✓ длительность пробного берётся из настроек и меняется без перезапуска")
+    await store.update({"trial_enabled": False}, "t")
+    await svc.register(901, "x")
+    await expect_err(svc.claim_trial(901), "недоступен")
+    await store.reset("trial_enabled"); await store.reset("trial_days")
+    assert store.get("trial_days") == 30 and store.get("trial_enabled") is True
+    print("✓ отключение пробного и сброс к значению по умолчанию")
+
+    # --- рефералка управляется настройками
+    a, _ = await svc.register(910, "ref_a")
+    await store.update({"referral_enabled": False}, "t")
+    b, _ = await svc.register(911, "ref_b", referrer_id=a.id)
+    o = await svc.process_payment(telegram_id=911, plan_id=plan.id, provider="stars", currency="XTR", amount=150, external_id="r-off")
+    assert o.status == "ok" and o.referrer_telegram_id is None
+    await store.reset("referral_enabled")
+    await store.update({"referral_bonus_days": "10", "referral_invited_bonus_days": "5"}, "t")
+    c, _ = await svc.register(912, "ref_c", referrer_id=a.id)
+    ra = days_left(remna, (await svc.get_user(910)).remna_uuid) if (await svc.get_user(910)).remna_uuid else 0
+    o = await svc.process_payment(telegram_id=912, plan_id=plan.id, provider="stars", currency="XTR", amount=150, external_id="r-on")
+    assert o.referrer_telegram_id == 910 and o.bonus_days == 10 and o.invited_bonus_days == 5, o
+    cu = await svc.get_user(912)
+    assert 34.9 < days_left(remna, cu.remna_uuid) < 35.1
+    await store.reset("referral_bonus_days"); await store.reset("referral_invited_bonus_days")
+    print("✓ рефералка: выключатель, бонус рефереру и приглашённому из настроек")
+
+    # --- источники и события
+    async with sm() as s:
+        assert (await s.get(User, b.id)).source == "ref" and (await s.get(User, a.id)).source == "organic"
+    await svc.create_promo("SRC1", "days", 3, audience="new")
+    await svc.register(920, "promo_guy")
+    await svc.redeem_promo(920, "SRC1")
+    async with sm() as s:
+        pu = (await s.execute(select(User).where(User.telegram_id == 920))).scalar_one()
+        assert pu.source == "promo" and pu.source_promo_id is not None
+        kinds = {r[0] for r in (await s.execute(select(Event.type))).all()}
+    assert {"registered", "subscription_granted", "promo_redeemed", "payment_granted"} <= kinds, kinds
+    print("✓ источник пользователя и журнал событий пишутся")
+
+    # --- тарифы: правка, удаление, цены
+    p2 = await svc.add_plan("тест", 10, 50)
+    await svc.update_plan(p2.id, title="тест2", days=11, sort_order=5)
+    await svc.set_price(p2.id, 70, "RUB"); await svc.remove_price(p2.id, "RUB")
+    await svc.delete_plan(p2.id)
+    await expect_err(svc.delete_plan(plan.id), "платеж")
+    print("✓ тарифы: правка, цены, удаление (с защитой, если есть платежи)")
+
+    # --- одноразовый вход в веб
+    tok = await svc.create_login_token(1)
+    assert await svc.consume_login_token(tok) == 1
+    assert await svc.consume_login_token(tok) is None
+    assert await svc.consume_login_token("junk") is None
+    print("✓ токен входа в веб одноразовый")
+
+    # --- синхронизация снимка и аналитика
+    n = await svc.sync_subscriptions(pause=0)
+    assert n > 0
+    ov = await analytics.overview(sm, 30)
+    assert ov["users"]["total"] >= 10 and ov["users"]["old"] >= 3 and ov["subs"]["active"] > 0
+    assert any(x["source"] == "promo" for x in ov["sources"]) and ov["revenue"]["total"]
+    for flt in analytics.USER_FILTERS:
+        await analytics.search_users(sm, "", flt, 1)
+    assert (await analytics.search_users(sm, "@promo_guy", "all")).total == 1
+    card = await analytics.user_card(sm, 920); assert card and card["events"]
+    assert (await analytics.list_payments(sm, "all")).total > 0
+    assert (await analytics.promo_card(sm, "SRC1"))["stats"]["attributed"] == 1
+    await analytics.list_audit(sm); await analytics.plans_with_usage(sm)
+    print("✓ аналитика: обзор, фильтры, карточки (включая подсчёт новичков/старичков/источников)")
+
+
 async def main():
     cfg = Settings(bot_token="x", remnawave_url="http://x", remnawave_token="x", admin_ids="1")
-    engine, sm = make_engine("sqlite+aiosqlite:///:memory:")
-    await init_db(engine)
+    url = os.environ.get("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    engine, sm = make_engine(url)
+    if url.startswith("sqlite"):
+        await init_db(engine)
+    else:   # на PostgreSQL проверяем настоящие миграции на чистой БД
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await run_migrations(engine, url)
     remna = FakeRemna()
-    svc = VPNService(sm, remna, cfg)
+    store = SettingsStore(sm, cfg)
+    await store.load()
+    svc = VPNService(sm, remna, cfg, store)
 
     # --- триал: один раз
     a, created = await svc.register(100, "alice"); assert created
@@ -253,6 +349,7 @@ async def main():
     except VPNError: pass
     print("✓ pre_checkout сверяет цену; после удаления триал повторно не выдаётся")
     await promo_tests(svc, remna, plan)
+    await extra_tests(svc, store, remna, plan, sm)
     await engine.dispose()
     print("\nВсе проверки пройдены")
 

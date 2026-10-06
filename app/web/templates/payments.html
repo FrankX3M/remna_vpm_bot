@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block title %}Платежи{% endblock %}
+{% block body %}
+<h1>Платежи</h1>
+<p>{% for k, t in [("all","Все"),("pending","Не выданы"),("granted","Выданы")] %}<a class="btn {{ '' if pstatus == k else 'sec' }}" href="/payments?status={{ k }}">{{ t }}</a> {% endfor %}</p>
+<div class="card"><p class="mut">Всего: {{ page.total }}</p><div class="scroll"><table>
+<tr><th>#</th><th>Дата</th><th>Пользователь</th><th>Тариф</th><th>Сумма</th><th>Скидка</th><th>Статус</th><th></th></tr>
+{% for r in page['items'] %}{% set p = r.payment %}<tr><td>{{ p.id }}</td><td>{{ p.created_at|dt }}</td>
+<td><a href="/users/{{ r.tg_id }}">{{ '@' ~ r.username if r.username else r.tg_id }}</a></td><td>{{ r.plan or '—' }} ({{ p.days }} дн.)</td>
+<td>{{ p.amount|money(p.currency) }}</td><td>{% if p.discount_percent %}−{{ p.discount_percent }}% {{ r.promo or '' }}{% else %}—{% endif %}</td>
+<td>{% if p.granted %}<span class="tag ok">выдано</span>{% else %}<span class="tag er">не выдано</span>{% endif %}</td>
+<td>{% if not p.granted %}<form class="inline" method="post" action="/payments/{{ p.id }}/regrant"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sec">Выдать повторно</button></form>{% endif %}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">Платежей нет.</td></tr>{% endfor %}</table></div>
+{% include "_pager.html" %}</div>
+{% endblock %}

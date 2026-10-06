@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% block title %}Настройки{% endblock %}
+{% block body %}
+<h1>Настройки бота</h1>
+<p class="mut">Все значения применяются сразу, без перезапуска. Пометка «изменено» — значение отличается от стандартного; «сбросить» вернёт стандартное (или значение из .env).</p>
+{% for g in rows %}
+<details id="g-{{ g.key }}" {{ 'open' if (open_group == g.key) }}>
+<summary>{{ g.title }}</summary>
+<form method="post" action="/settings/{{ g.key }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% for it in g['items'] %}{% set d = it.d %}
+<div>
+{% if d.kind == 'bool' %}
+<label style="font-weight:600"><input type="checkbox" name="{{ d.key }}" {{ 'checked' if it.value }}> {{ d.label }}</label>
+{% else %}
+<label for="f-{{ d.key }}">{{ d.label }}</label>
+{% if d.kind == 'int' %}<input id="f-{{ d.key }}" type="number" name="{{ d.key }}" value="{{ it.value }}" {% if d.min is not none %}min="{{ d.min }}"{% endif %} {% if d.max is not none %}max="{{ d.max }}"{% endif %}>
+{% elif d.kind == 'text' or d.apps %}<textarea id="f-{{ d.key }}" name="{{ d.key }}">{{ it.value }}</textarea>
+{% else %}<input id="f-{{ d.key }}" type="text" name="{{ d.key }}" value="{{ it.value }}">{% endif %}
+{% endif %}
+{% if it.error %}<div class="err">{{ it.error }}</div>{% endif %}
+{% if d.help %}<div class="help">{{ d.help }}</div>{% endif %}
+{% if d.placeholders %}<div class="help">Переменные: <code>{{ d.placeholders }}</code></div>{% endif %}
+{% if d.html %}<div class="help">Допустима разметка Telegram: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;, &lt;a href="…"&gt;.</div>{% endif %}
+{% if d.apps %}<div class="help">По строке на приложение: <code>Название | https://ссылка</code></div>{% endif %}
+{% if it.custom %}<div class="help"><span class="tag">изменено</span>
+<button class="lnk" form="reset-{{ d.key }}">сбросить</button></div>{% endif %}
+</div>
+{% endfor %}
+<p><button>Сохранить раздел «{{ g.title }}»</button></p>
+</form>
+{% for it in g['items'] if it.custom %}
+<form id="reset-{{ it.d.key }}" method="post" action="/settings/reset/{{ it.d.key }}"><input type="hidden" name="csrf" value="{{ csrf }}"></form>
+{% endfor %}
+</details>
+{% endfor %}
+{% endblock %}

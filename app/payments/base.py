@@ -32,7 +32,8 @@ class PaymentProvider(ABC):
 
     @abstractmethod
     async def start(
-        self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0
+        self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
+        description: str | None = None,
     ) -> None:
         """Показать пользователю счёт / ссылку на оплату.
         amount — уже с учётом скидки; redemption_id (активация промокода-скидки) нужно положить в payload через
@@ -59,10 +60,11 @@ async def announce_outcome(bot: Bot, chat_id: int, outcome: PaymentOutcome, admi
         return
 
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🔗 Моя подписка", callback_data="config")]]
+        inline_keyboard=[[InlineKeyboardButton(text="📲 Подключиться", callback_data="connect")]]
     )
+    extra = f"\n🎁 Бонус за приглашение: +{outcome.invited_bonus_days} дн." if outcome.invited_bonus_days else ""
     await bot.send_message(
-        chat_id, f"✅ Оплата получена! Подписка активна до <b>{fmt_dt(outcome.expire_at)}</b>.", reply_markup=kb
+        chat_id, f"✅ Оплата получена! Подписка активна до <b>{fmt_dt(outcome.expire_at)}</b>.{extra}", reply_markup=kb
     )
     if outcome.referrer_telegram_id:
         try:

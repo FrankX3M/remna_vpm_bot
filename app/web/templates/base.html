@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Админка{% endblock %} · VPN-бот</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--tx:#1b1f24;--mut:#667085;--br:#d9dde3;--ac:#2563eb;--ok:#15803d;--er:#b42318;--wa:#b54708}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1a1f26;--tx:#e6e8eb;--mut:#98a2b3;--br:#2d343d;--ac:#6ea0ff;--ok:#4ade80;--er:#f97066;--wa:#fdb022}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+a{color:var(--ac);text-decoration:none}a:hover{text-decoration:underline}
+header{background:var(--card);border-bottom:1px solid var(--br);position:sticky;top:0;z-index:5}
+nav{display:flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:1180px;margin:0 auto;padding:8px 16px}
+nav a{padding:6px 12px;border-radius:8px;color:var(--tx)}nav a.on{background:var(--ac);color:#fff}nav .sp{flex:1}
+nav form{margin:0}
+main{max-width:1180px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:4px 0 14px}h2{font-size:17px;margin:0 0 10px}h3{font-size:15px;margin:14px 0 6px}
+.card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.kpi{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px 14px}
+.kpi b{display:block;font-size:24px}.kpi span{color:var(--mut);font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:7px 8px;border-bottom:1px solid var(--br);text-align:left;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+.scroll{overflow-x:auto}
+input,select,textarea,button{font:inherit;color:inherit}
+input[type=text],input[type=number],input[type=search],input[type=date],select,textarea{width:100%;padding:7px 9px;border:1px solid var(--br);border-radius:8px;background:var(--bg)}
+textarea{min-height:110px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+button,.btn{display:inline-block;padding:7px 14px;border-radius:8px;border:1px solid var(--ac);background:var(--ac);color:#fff;cursor:pointer}
+button.sec,.btn.sec{background:transparent;color:var(--ac)}button.dng{background:var(--er);border-color:var(--er)}
+button.lnk{background:none;border:0;color:var(--ac);padding:0}
+label{display:block;font-weight:600;margin:10px 0 3px}.help{color:var(--mut);font-size:13px;margin-top:2px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.row>*{flex:1;min-width:130px}.row>.fit{flex:0 0 auto}
+.flash{padding:10px 14px;border-radius:8px;margin-bottom:12px;border:1px solid}
+.flash.ok{border-color:var(--ok);color:var(--ok)}.flash.err{border-color:var(--er);color:var(--er)}
+.err{color:var(--er);font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}.wa{color:var(--wa)}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--br);font-size:12px;color:var(--mut)}
+.tag.ok{color:var(--ok);border-color:var(--ok)}.tag.er{color:var(--er);border-color:var(--er)}
+details{border:1px solid var(--br);border-radius:10px;padding:8px 12px;margin-bottom:10px;background:var(--card)}
+summary{cursor:pointer;font-weight:600}
+.pager{display:flex;gap:10px;justify-content:center;margin-top:12px;color:var(--mut)}
+.inline{display:inline}.bar{display:inline-block;height:8px;background:var(--ac);border-radius:4px;vertical-align:middle}
+code{background:var(--bg);padding:1px 5px;border-radius:5px;font-size:13px}
+</style></head><body>
+{% if admin %}
+<header><nav>
+{% for href, title in [("/","Обзор"),("/users","Пользователи"),("/payments","Платежи"),("/promos","Промокоды"),("/plans","Тарифы"),("/settings","Настройки"),("/audit","Журнал")] %}
+<a href="{{ href }}" class="{{ 'on' if (nav_path == href or (href != '/' and nav_path.startswith(href))) }}">{{ title }}</a>
+{% endfor %}
+<span class="sp"></span>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sec">Выйти</button></form>
+</nav></header>
+{% endif %}
+<main>
+{% for kind, text in flash %}<div class="flash {{ kind }}">{{ text }}</div>{% endfor %}
+{% block body %}{% endblock %}
+</main></body></html>

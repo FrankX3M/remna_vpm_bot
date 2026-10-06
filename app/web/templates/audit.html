@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Журнал{% endblock %}
+{% block body %}
+<h1>Журнал действий администраторов</h1>
+<div class="card"><div class="scroll"><table><tr><th>Когда</th><th>Админ</th><th>Откуда</th><th>Действие</th><th>Объект</th><th>Детали</th></tr>
+{% for a in page['items'] %}<tr><td>{{ a.ts|dt }}</td><td>{{ a.admin_tg_id }}</td><td>{{ a.via }}</td><td><code>{{ a.action }}</code></td><td>{{ a.target or '' }}</td>
+<td class="mut">{% if a.details %}{% for k, v in a.details.items() %}{{ k }}={{ v }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">Записей нет.</td></tr>{% endfor %}</table></div>
+{% include "_pager.html" %}</div>
+{% endblock %}

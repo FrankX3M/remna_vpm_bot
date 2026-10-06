@@ -5,7 +5,7 @@ from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.filters import BaseFilter, Command, CommandObject
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
 
 from ..config import Settings
 from ..formatting import account_text, config_text, plan_line
@@ -25,6 +25,8 @@ router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
 HELP = """🛠 <b>Админ-панель</b>
+
+🌐 <b>Веб-админка</b>: /web — одноразовая ссылка для входа (только из туннеля). Там же настройки бота, аналитика и все операции ниже.
 
 <b>Тарифы</b>
 /plans — все тарифы
@@ -65,6 +67,42 @@ def _need(args: list[str], n: int, usage: str) -> None:
         raise VPNError(f"Формат: {usage}")
 
 
+def _actor(message: Message) -> str:
+    return f"admin:{message.from_user.id}"
+
+
+async def _web_login_url(svc: VPNService, settings: Settings, admin_id: int) -> str | None:
+    if not settings.web_enabled or not settings.web_base_url:
+        return None
+    token = await svc.create_login_token(admin_id)
+    return f"{settings.web_base_url.rstrip('/')}/login?t={token}"
+
+
+async def _send_web_link(target: Message, svc: VPNService, settings: Settings, admin_id: int) -> None:
+    url = await _web_login_url(svc, settings, admin_id)
+    if not url:
+        await target.answer("Веб-админка не настроена: задайте WEB_BASE_URL в .env (например https://bot.1rtp.ru) и перезапустите бота.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🌐 Открыть админку", url=url)]])
+    await target.answer(
+        "🔐 <b>Ссылка для входа</b> — одноразовая, действует 5 минут.\n"
+        "Открывать нужно с устройства, подключённого к туннелю: снаружи админка недоступна.",
+        reply_markup=kb,
+    )
+    await svc.audit(admin_id, "web.login_link", via="bot")
+
+
+@router.message(Command("web"))
+async def web_cmd(message: Message, svc: VPNService, settings: Settings) -> None:
+    await _send_web_link(message, svc, settings, message.from_user.id)
+
+
+@router.callback_query(F.data == "admin_web")
+async def web_cb(cb: CallbackQuery, svc: VPNService, settings: Settings) -> None:
+    await cb.answer()
+    await _send_web_link(cb.message, svc, settings, cb.from_user.id)
+
+
 async def _user_card(svc: VPNService, telegram_id: int) -> str:
     acc = await svc.get_account(telegram_id)
     u = acc.user
@@ -98,6 +136,7 @@ async def addplan(message: Message, command: CommandObject, svc: VPNService) -> 
     _need(a, 3, "/addplan ДНИ ЗВЁЗДЫ Название")
     plan = await svc.add_plan(" ".join(a[2:]), _int(a[0], "Дни"), _int(a[1], "Цена"))
     plan = await svc.get_plan(plan.id)
+    await svc.audit(message.from_user.id, "plan.add", f"plan:{plan.id}", {"days": plan.days}, via="bot")
     await message.answer("Добавлено:\n" + plan_line(plan))
 
 
@@ -107,6 +146,7 @@ async def setprice(message: Message, command: CommandObject, svc: VPNService) ->
     _need(a, 2, "/setprice ID ЦЕНА [ВАЛЮТА]")
     currency = a[2].upper() if len(a) > 2 else "XTR"
     await svc.set_price(_int(a[0], "ID"), _int(a[1], "Цена"), currency)
+    await svc.audit(message.from_user.id, "plan.price", f"plan:{a[0]}", {"amount": a[1], "currency": currency}, via="bot")
     await message.answer("Готово:\n" + plan_line(await svc.get_plan(int(a[0]))))
 
 
@@ -115,6 +155,7 @@ async def toggleplan(message: Message, command: CommandObject, svc: VPNService) 
     a = _args(command)
     _need(a, 1, "/toggleplan ID")
     active = await svc.toggle_plan(_int(a[0], "ID"))
+    await svc.audit(message.from_user.id, "plan.toggle", f"plan:{a[0]}", {"active": active}, via="bot")
     await message.answer("Тариф включён ✅" if active else "Тариф скрыт ⏸")
 
 
@@ -132,7 +173,8 @@ async def adduser(message: Message, command: CommandObject, svc: VPNService) -> 
     a = _args(command)
     _need(a, 2, "/adduser TG_ID ДНИ")
     tg_id = _int(a[0], "TG ID")
-    await svc.admin_create_or_extend(tg_id, _int(a[1], "Дни"), must_exist=False)
+    await svc.admin_create_or_extend(tg_id, _int(a[1], "Дни"), must_exist=False, actor=_actor(message))
+    await svc.audit(message.from_user.id, "user.adduser", f"tg:{tg_id}", {"days": a[1]}, via="bot")
     await message.answer("✅ Готово.\n\n" + await _user_card(svc, tg_id))
 
 
@@ -141,7 +183,8 @@ async def extend(message: Message, command: CommandObject, bot: Bot, svc: VPNSer
     a = _args(command)
     _need(a, 2, "/extend TG_ID ДНИ")
     tg_id, days = _int(a[0], "TG ID"), _int(a[1], "Дни")
-    exp = await svc.admin_create_or_extend(tg_id, days, must_exist=True)
+    exp = await svc.admin_create_or_extend(tg_id, days, must_exist=True, actor=_actor(message))
+    await svc.audit(message.from_user.id, "user.extend", f"tg:{tg_id}", {"days": days}, via="bot")
     await message.answer(f"✅ Продлено на {days} дн. Действует до <b>{fmt_dt(exp)}</b>.")
     try:
         await bot.send_message(tg_id, f"🎁 Администратор продлил вашу подписку на {days} дн. Действует до <b>{fmt_dt(exp)}</b>.")
@@ -157,7 +200,8 @@ async def deluser(message: Message, command: CommandObject, svc: VPNService) -> 
     if len(a) < 2 or a[1].lower() != "yes":
         await message.answer(f"Подтвердите удаление: <code>/deluser {tg_id} yes</code>")
         return
-    await svc.admin_delete_user(tg_id)
+    await svc.admin_delete_user(tg_id, actor=_actor(message))
+    await svc.audit(message.from_user.id, "user.delete_panel", f"tg:{tg_id}", via="bot")
     await message.answer("🗑 Удалён в панели. Локальная запись (пробный период, оплаты, рефералы) сохранена.")
 
 
@@ -287,6 +331,7 @@ async def addpromo(message: Message, command: CommandObject, svc: VPNService) ->
         per_user=opts.get("per_user", 1), expires_at=opts.get("expires_at"),
     )
     st = await svc.get_promo(promo.code)
+    await svc.audit(message.from_user.id, "promo.create", promo.code, {"kind": kind, "value": promo.value}, via="bot")
     await message.answer("✅ Создан:\n" + _promo_line(st))
 
 
@@ -319,7 +364,9 @@ async def promoinfo(message: Message, command: CommandObject, svc: VPNService) -
 async def setpromo(message: Message, command: CommandObject, svc: VPNService) -> None:
     a = _args(command)
     _need(a, 2, "/setpromo КОД поле=значение … (value, limit, per_user, for, until)")
-    await svc.update_promo(a[0], **_parse_opts(a[1:]))
+    opts = _parse_opts(a[1:])
+    await svc.update_promo(a[0], **opts)
+    await svc.audit(message.from_user.id, "promo.update", a[0].upper(), {k: str(v) for k, v in opts.items()}, via="bot")
     await message.answer("Готово:\n" + _promo_line(await svc.get_promo(a[0])))
 
 
@@ -327,7 +374,9 @@ async def setpromo(message: Message, command: CommandObject, svc: VPNService) ->
 async def togglepromo(message: Message, command: CommandObject, svc: VPNService) -> None:
     a = _args(command)
     _need(a, 1, "/togglepromo КОД")
-    await message.answer("Промокод включён ✅" if await svc.toggle_promo(a[0]) else "Промокод выключен ⏸")
+    state = await svc.toggle_promo(a[0])
+    await svc.audit(message.from_user.id, "promo.toggle", a[0].upper(), {"active": state}, via="bot")
+    await message.answer("Промокод включён ✅" if state else "Промокод выключен ⏸")
 
 
 @router.message(Command("delpromo"))
@@ -338,6 +387,7 @@ async def delpromo(message: Message, command: CommandObject, svc: VPNService) ->
         await message.answer(f"Подтвердите удаление: <code>/delpromo {escape(a[0])} yes</code>")
         return
     await svc.delete_promo(a[0])
+    await svc.audit(message.from_user.id, "promo.delete", a[0].upper(), via="bot")
     await message.answer("🗑 Промокод удалён.")
 
 # ---------------------------------------------------------------- платежи
@@ -360,6 +410,7 @@ async def regrant(message: Message, command: CommandObject, bot: Bot, svc: VPNSe
     a = _args(command)
     _need(a, 1, "/regrant ID_ПЛАТЕЖА")
     out = await svc.retry_payment(_int(a[0], "ID"))
+    await svc.audit(message.from_user.id, "payment.regrant", f"payment:{a[0]}", {"status": out.status}, via="bot")
     if out.status == "ok":
         await message.answer(f"✅ Выдано, подписка до <b>{fmt_dt(out.expire_at)}</b>.")
         # уведомим покупателя и, если был бонус, реферера

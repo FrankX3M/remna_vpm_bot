@@ -1,0 +1,4 @@
+{% if page.pages > 1 %}<div class="pager">
+{% if page.page > 1 %}<a href="?{{ qs_prev }}">← назад</a>{% endif %}
+<span>стр. {{ page.page }} из {{ page.pages }}</span>
+{% if page.page < page.pages %}<a href="?{{ qs_next }}">вперёд →</a>{% endif %}</div>{% endif %}

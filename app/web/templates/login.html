@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Вход{% endblock %}
+{% block body %}<div class="card" style="max-width:520px;margin:60px auto"><h1>Вход в админку</h1>
+{% if token %}<p>Подтвердите вход. Ссылка одноразовая — после нажатия она перестанет работать.</p>
+<form method="post" action="/login"><input type="hidden" name="t" value="{{ token }}"><button>Войти</button></form>
+{% else %}<p>Нет ссылки для входа. Отправьте боту команду <code>/web</code> — он пришлёт одноразовую ссылку.</p>{% endif %}</div>{% endblock %}

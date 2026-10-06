@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
+import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -17,8 +19,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .config import Settings
-from .db import Payment, Plan, PlanPrice, PromoCode, PromoRedemption, User, utcnow
+from .db import (
+    AdminAudit, Event, Payment, Plan, PlanPrice, PromoCode, PromoRedemption, SubscriptionState, User,
+    WebLoginToken, utcnow,
+)
 from .remnawave import RemnawaveClient
+from .settings_store import SettingsStore
 from .utils import ensure_utc, iso, parse_dt
 
 log = logging.getLogger(__name__)
@@ -47,13 +53,13 @@ class PaymentOutcome:
     referrer_telegram_id: int | None = None
     referrer_expire_at: datetime | None = None
     bonus_days: int = 0
+    # бонус самому покупателю (приглашённому) — если включён в настройках
+    invited_bonus_days: int = 0
 
 
 PROMO_KINDS = ("days", "discount", "trial")
 PROMO_AUDIENCES = ("all", "new", "old")
 _CODE_RE = re.compile(r"^[\w-]{3,32}$")
-PROMO_MAX_FAILS = 8          # неудачных вводов...
-PROMO_FAIL_WINDOW = 600.0    # ...за столько секунд — и пользователь временно блокируется (защита от перебора)
 
 
 def normalize_code(raw: str) -> str:
@@ -90,16 +96,54 @@ class PromoStat:
 
 
 class VPNService:
-    def __init__(self, sessionmaker: async_sessionmaker, remna: RemnawaveClient, settings: Settings):
+    def __init__(self, sessionmaker: async_sessionmaker, remna: RemnawaveClient, settings: Settings,
+                 store: SettingsStore | None = None):
         self.sm = sessionmaker
         self.remna = remna
         self.cfg = settings
+        self.store = store or SettingsStore(sessionmaker, settings)
         # Блокировки на пользователя: два платежа/действия одного человека не пересекутся.
         # Работает в пределах одного процесса бота.
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Порядок блокировок: сначала _promo_lock (короткая, без сети), потом блокировка пользователя.
         self._promo_lock = asyncio.Lock()
         self._promo_fails: dict[int, deque] = defaultdict(deque)
+
+    # ------------------------------------------------------------------ события и аудит
+
+    async def _event(self, type_: str, *, user_id: int | None = None, reason: str | None = None, days: int | None = None,
+                     expire_after: datetime | None = None, promo_id: int | None = None, payment_id: int | None = None,
+                     actor: str = "system", **data) -> None:
+        """Пишет событие в журнал. Ошибка журнала не должна ломать бизнес-операцию, поэтому только логируем."""
+        try:
+            async with self.sm() as s:
+                s.add(Event(type=type_, user_id=user_id, reason=reason, days=days, expire_after=expire_after,
+                            promo_id=promo_id, payment_id=payment_id, actor=actor, data=data or None))
+                await s.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось записать событие %s", type_)
+
+    async def audit(self, admin_tg_id: int | None, action: str, target: str | None = None, details: dict | None = None,
+                    via: str = "web") -> None:
+        try:
+            async with self.sm() as s:
+                s.add(AdminAudit(admin_tg_id=admin_tg_id, via=via, action=action, target=(target or "")[:128] or None,
+                                 details=details or None))
+                await s.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось записать аудит %s", action)
+
+    async def _save_state(self, user_id: int, expire_at: datetime | None, status: str | None) -> None:
+        try:
+            async with self.sm() as s:
+                row = await s.get(SubscriptionState, user_id)
+                if row is None:
+                    s.add(SubscriptionState(user_id=user_id, expire_at=expire_at, status=status, synced_at=utcnow()))
+                else:
+                    row.expire_at, row.status, row.synced_at = expire_at, status, utcnow()
+                await s.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось сохранить снимок подписки user=%s", user_id)
 
     # ------------------------------------------------------------------ пользователи
 
@@ -113,7 +157,8 @@ class VPNService:
             raise VPNError("Пользователь не найден. Нажмите /start.")
         return user
 
-    async def register(self, telegram_id: int, tg_username: str | None, referrer_id: int | None = None) -> tuple[User, bool]:
+    async def register(self, telegram_id: int, tg_username: str | None, referrer_id: int | None = None,
+                       actor: str = "user") -> tuple[User, bool]:
         """Создаёт пользователя при первом /start. Реферер учитывается только для НОВЫХ пользователей."""
         async with self.sm() as s:
             user = (await s.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
@@ -129,7 +174,8 @@ class VPNService:
                 if ref and ref.telegram_id != telegram_id:
                     valid_ref = ref.id
 
-            user = User(telegram_id=telegram_id, tg_username=tg_username, referrer_id=valid_ref)
+            user = User(telegram_id=telegram_id, tg_username=tg_username, referrer_id=valid_ref,
+                        source="ref" if valid_ref else "organic")
             s.add(user)
             try:
                 await s.commit()
@@ -137,7 +183,8 @@ class VPNService:
                 await s.rollback()
                 user = (await s.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one()
                 return user, False
-            return user, True
+        await self._event("registered", user_id=user.id, actor=actor, source=user.source, referrer_id=valid_ref)
+        return user, True
 
     async def get_account(self, telegram_id: int) -> Account:
         user = await self._require_user(telegram_id)
@@ -179,8 +226,10 @@ class VPNService:
 
     # ------------------------------------------------------------------ выдача дней
 
-    async def _grant_unlocked(self, user_id: int, days: int) -> datetime:
-        """Продлевает подписку на N дней (от текущего конца, если она ещё активна). Вызывать под локом."""
+    async def _grant_unlocked(self, user_id: int, days: int, *, reason: str = "admin", actor: str = "system",
+                              payment_id: int | None = None, promo_id: int | None = None) -> datetime:
+        """Продлевает подписку на N дней (от текущего конца, если она ещё активна). Вызывать под локом.
+        reason: trial | payment | promo | referral | admin — попадает в журнал событий."""
         async with self.sm() as s:
             user = await s.get(User, user_id)
         if user is None or user.telegram_id is None:
@@ -196,15 +245,16 @@ class VPNService:
 
         if ru is None:
             new_exp = now + timedelta(days=days)
-            limit_gb = self.cfg.traffic_limit_gb
+            limit_gb = self.store.get_int("traffic_limit_gb")
+            hwid = self.store.get_int("hwid_limit")
             ru = await self.remna.create_user(
                 username=username,
                 expire_at=new_exp,
                 telegram_id=user.telegram_id,
                 traffic_limit_bytes=limit_gb * 1024**3 if limit_gb else 0,
                 traffic_strategy="MONTH" if limit_gb else "NO_RESET",
-                squads=self.cfg.squad_list,
-                hwid_limit=self.cfg.hwid_limit or None,
+                squads=self.store.squads(),
+                hwid_limit=hwid or None,
             )
         else:
             current = parse_dt(ru.get("expireAt"))
@@ -219,25 +269,31 @@ class VPNService:
             async with self.sm() as s:
                 await s.execute(update(User).where(User.id == user_id).values(remna_uuid=ru["uuid"]))
                 await s.commit()
+        await self._save_state(user_id, new_exp, "ACTIVE")
+        await self._event("subscription_granted", user_id=user_id, reason=reason, days=days, expire_after=new_exp,
+                          promo_id=promo_id, payment_id=payment_id, actor=actor)
         return new_exp
 
-    async def grant_days(self, user_id: int, days: int) -> datetime:
+    async def grant_days(self, user_id: int, days: int, *, reason: str = "admin", actor: str = "system") -> datetime:
         async with self._locks[user_id]:
-            return await self._grant_unlocked(user_id, days)
+            return await self._grant_unlocked(user_id, days, reason=reason, actor=actor)
 
     # ------------------------------------------------------------------ пробный период
 
     async def claim_trial(self, telegram_id: int) -> datetime:
+        if not self.store.get("trial_enabled"):
+            raise VPNError("Пробный период сейчас недоступен.")
         user = await self._require_user(telegram_id)
         async with self._locks[user.id]:
             async with self.sm() as s:
-                paid = (
-                    await s.execute(
-                        select(func.count()).select_from(Payment).where(Payment.user_id == user.id, Payment.granted.is_(True))
-                    )
-                ).scalar_one()
-                if paid:
-                    raise VPNError("Пробный период доступен только до первой покупки.")
+                if self.store.get("trial_only_before_purchase"):
+                    paid = (
+                        await s.execute(
+                            select(func.count()).select_from(Payment).where(Payment.user_id == user.id, Payment.granted.is_(True))
+                        )
+                    ).scalar_one()
+                    if paid:
+                        raise VPNError("Пробный период доступен только до первой покупки.")
                 # атомарно: флаг ставится только один раз, даже при двойном клике
                 res = await s.execute(
                     update(User).where(User.id == user.id, User.trial_used.is_(False)).values(trial_used=True)
@@ -246,7 +302,7 @@ class VPNService:
                 if res.rowcount == 0:
                     raise VPNError("Пробный период уже использован.")
             try:
-                return await self._grant_unlocked(user.id, self.cfg.trial_days)
+                return await self._grant_unlocked(user.id, self.store.get_int("trial_days"), reason="trial", actor="user")
             except Exception:
                 async with self.sm() as s:  # откатываем флаг, чтобы человек мог повторить
                     await s.execute(update(User).where(User.id == user.id).values(trial_used=False))
@@ -262,6 +318,7 @@ class VPNService:
         async with self._locks[user.id]:
             await self.remna.revoke_subscription(user.remna_uuid)
             ru = await self.remna.get_user(user.remna_uuid)
+        await self._event("link_revoked", user_id=user.id, actor="user")
         return self.sub_url(ru)
 
     # ------------------------------------------------------------------ тарифы
@@ -372,9 +429,21 @@ class VPNService:
                 await s.execute(select(Payment).where(Payment.provider == provider, Payment.external_id == external_id))
             ).scalar_one_or_none()
             if existing is None:
+                disc_pct, disc_promo = 0, None
+                if redemption_id:
+                    row = (
+                        await s.execute(
+                            select(PromoRedemption, PromoCode)
+                            .join(PromoCode, PromoCode.id == PromoRedemption.promo_id)
+                            .where(PromoRedemption.id == redemption_id, PromoRedemption.user_id == user.id)
+                        )
+                    ).first()
+                    if row is not None:
+                        disc_pct, disc_promo = row[1].value, row[1].id
                 pay = Payment(
                     user_id=user.id, plan_id=plan.id, provider=provider, currency=currency,
                     amount=amount, days=plan.days, external_id=external_id, granted=False,
+                    list_amount=plan.price(currency), discount_percent=disc_pct, promo_id=disc_promo,
                 )
                 s.add(pay)
                 try:
@@ -405,7 +474,7 @@ class VPNService:
             pay = await s.get(Payment, pay_id)
             if pay is None:
                 raise VPNError("Платёж не найден.")
-            user_id, days = pay.user_id, pay.days
+            user_id, days, promo_id = pay.user_id, pay.days, pay.promo_id
 
         async with self._locks[user_id]:
             async with self.sm() as s:
@@ -413,10 +482,13 @@ class VPNService:
                 if pay.granted:
                     return PaymentOutcome("duplicate", pay_id)
             try:
-                expire_at = await self._grant_unlocked(user_id, days)
+                expire_at = await self._grant_unlocked(
+                    user_id, days, reason="payment", actor="system", payment_id=pay_id, promo_id=promo_id
+                )
             except Exception:
                 # деньги получены, но панель недоступна: платёж остаётся granted=False → /pending и /regrant
                 log.exception("Не удалось выдать подписку по платежу %s", pay_id)
+                await self._event("payment_failed", user_id=user_id, payment_id=pay_id, promo_id=promo_id)
                 return PaymentOutcome("error", pay_id)
             async with self.sm() as s:
                 await s.execute(update(Payment).where(Payment.id == pay_id).values(granted=True))
@@ -428,33 +500,55 @@ class VPNService:
                 await s.commit()
 
         outcome = PaymentOutcome("ok", pay_id, expire_at)
+        await self._event("payment_granted", user_id=user_id, payment_id=pay_id, promo_id=promo_id, days=days,
+                          expire_after=expire_at)
         await self._reward_referrer(user_id, outcome)
         return outcome
 
     async def _reward_referrer(self, user_id: int, outcome: PaymentOutcome) -> None:
-        """Бонус пригласившему — только за ПЕРВУЮ покупку приглашённого."""
-        async with self.sm() as s:
-            res = await s.execute(
-                update(User)
-                .where(User.id == user_id, User.referrer_id.is_not(None), User.referral_rewarded.is_(False))
-                .values(referral_rewarded=True)
-            )
-            await s.commit()
-            if res.rowcount != 1:
-                return
-            user = await s.get(User, user_id)
-            referrer = await s.get(User, user.referrer_id)
-        try:
-            exp = await self.grant_days(referrer.id, self.cfg.referral_bonus_days)
-        except Exception:
-            log.exception("Не удалось начислить реферальный бонус (referrer=%s)", referrer.id)
-            async with self.sm() as s:  # вернём флаг: бонус начислится при следующей покупке приглашённого
-                await s.execute(update(User).where(User.id == user_id).values(referral_rewarded=False))
-                await s.commit()
+        """Бонусы за покупку приглашённого: пригласившему (и, если включено, самому покупателю)."""
+        if not self.store.get("referral_enabled"):
             return
-        outcome.referrer_telegram_id = referrer.telegram_id
-        outcome.referrer_expire_at = exp
-        outcome.bonus_days = self.cfg.referral_bonus_days
+        every = self.store.get("referral_every_purchase")
+        async with self.sm() as s:
+            if every:
+                user = await s.get(User, user_id)
+                if user is None or user.referrer_id is None:
+                    return
+            else:
+                res = await s.execute(
+                    update(User)
+                    .where(User.id == user_id, User.referrer_id.is_not(None), User.referral_rewarded.is_(False))
+                    .values(referral_rewarded=True)
+                )
+                await s.commit()
+                if res.rowcount != 1:
+                    return
+                user = await s.get(User, user_id)
+            referrer = await s.get(User, user.referrer_id)
+        bonus = self.store.get_int("referral_bonus_days")
+        invited_bonus = self.store.get_int("referral_invited_bonus_days")
+        if bonus > 0:
+            try:
+                exp = await self.grant_days(referrer.id, bonus, reason="referral", actor="system")
+            except Exception:
+                log.exception("Не удалось начислить реферальный бонус (referrer=%s)", referrer.id)
+                if not every:
+                    async with self.sm() as s:  # вернём флаг: бонус начислится при следующей покупке приглашённого
+                        await s.execute(update(User).where(User.id == user_id).values(referral_rewarded=False))
+                        await s.commit()
+                return
+            outcome.referrer_telegram_id = referrer.telegram_id
+            outcome.referrer_expire_at = exp
+            outcome.bonus_days = bonus
+        if invited_bonus > 0:
+            try:
+                outcome.expire_at = await self.grant_days(user_id, invited_bonus, reason="referral_invited", actor="system")
+                outcome.invited_bonus_days = invited_bonus
+            except Exception:
+                log.exception("Не удалось начислить бонус приглашённому (user=%s)", user_id)
+        await self._event("referral_reward", user_id=user_id, days=bonus, referrer_id=referrer.id,
+                          invited_bonus=invited_bonus)
 
     async def pending_payments(self) -> list[Payment]:
         async with self.sm() as s:
@@ -467,20 +561,24 @@ class VPNService:
     def _check_promo_attempts(self, user_id: int) -> None:
         q = self._promo_fails[user_id]
         now = time.monotonic()
-        while q and now - q[0] > PROMO_FAIL_WINDOW:
+        window = self.store.get_int("promo_fail_window_min") * 60.0
+        while q and now - q[0] > window:
             q.popleft()
-        if len(q) >= PROMO_MAX_FAILS:
-            wait = int((PROMO_FAIL_WINDOW - (now - q[0])) // 60) + 1
+        if len(q) >= self.store.get_int("promo_max_fails"):
+            wait = int((window - (now - q[0])) // 60) + 1
             raise VPNError(f"Слишком много неверных попыток. Повторите через {wait} мин.")
 
     async def redeem_promo(self, telegram_id: int, raw_code: str) -> PromoResult:
+        if not self.store.get("promo_enabled"):
+            raise VPNError("Промокоды сейчас недоступны.")
         user = await self._require_user(telegram_id)
         self._check_promo_attempts(user.id)
         try:
-            return await self._redeem(user, normalize_code(raw_code))
+            res = await self._redeem(user, normalize_code(raw_code))
         except VPNError:
             self._promo_fails[user.id].append(time.monotonic())
             raise
+        return res
 
     async def _redeem(self, user: User, code: str) -> PromoResult:
         # Проверка лимитов и создание активации — под общей блокировкой, чтобы последние места не раздали дважды.
@@ -528,7 +626,7 @@ class VPNService:
 
                 trial_flag_set = False
                 if promo.kind == "trial":
-                    if paid:
+                    if paid and self.store.get("trial_only_before_purchase"):
                         raise VPNError("Пробный период доступен только до первой покупки.")
                     res = await s.execute(
                         update(User).where(User.id == user.id, User.trial_used.is_(False)).values(trial_used=True)
@@ -548,18 +646,31 @@ class VPNService:
                     promo_id=promo.id, user_id=user.id, status="pending" if promo.kind == "discount" else "used"
                 )
                 s.add(red)
+                # атрибуция «привлечён по промокоду»: первое касание до первой покупки и не по реф-ссылке
+                attributed = False
+                if not paid:
+                    fresh = await s.get(User, user.id)
+                    if fresh.source == "organic" and fresh.source_promo_id is None:
+                        fresh.source, fresh.source_promo_id = "promo", promo.id
+                        attributed = True
                 await s.commit()
-                kind, value, rid = promo.kind, promo.value, red.id
+                kind, value, rid, pid = promo.kind, promo.value, red.id, promo.id
 
+        await self._event("promo_redeemed", user_id=user.id, promo_id=pid, actor="user", kind=kind, value=value,
+                          attributed=attributed)
         if kind == "discount":
             return PromoResult(kind, value, code)
 
         try:
             async with self._locks[user.id]:
-                expire_at = await self._grant_unlocked(user.id, value)
+                expire_at = await self._grant_unlocked(
+                    user.id, value, reason="promo_trial" if kind == "trial" else "promo", actor="user", promo_id=pid
+                )
         except Exception:
             async with self.sm() as s:  # выдать не удалось (панель недоступна): активацию и флаг триала возвращаем
                 await s.execute(delete(PromoRedemption).where(PromoRedemption.id == rid))
+                if attributed:
+                    await s.execute(update(User).where(User.id == user.id).values(source="organic", source_promo_id=None))
                 if trial_flag_set:
                     await s.execute(update(User).where(User.id == user.id).values(trial_used=False))
                 await s.commit()
@@ -604,6 +715,8 @@ class VPNService:
                     )
                 )
                 await s.commit()
+        if res.rowcount > 0:
+            await self._event("discount_cancelled", user_id=user.id, actor="user")
         return res.rowcount > 0
 
     # ------------------------------------------------------------------ промокоды (админ)
@@ -720,16 +833,17 @@ class VPNService:
 
     # ------------------------------------------------------------------ админ
 
-    async def admin_create_or_extend(self, telegram_id: int, days: int, *, must_exist: bool) -> datetime:
+    async def admin_create_or_extend(self, telegram_id: int, days: int, *, must_exist: bool,
+                                     actor: str = "admin") -> datetime:
         if days <= 0:
             raise VPNError("Количество дней должно быть больше нуля.")
         if must_exist:
             user = await self._require_user(telegram_id)
         else:
-            user, _ = await self.register(telegram_id, None)
-        return await self.grant_days(user.id, days)
+            user, _ = await self.register(telegram_id, None, actor=actor)
+        return await self.grant_days(user.id, days, reason="admin", actor=actor)
 
-    async def admin_delete_user(self, telegram_id: int) -> None:
+    async def admin_delete_user(self, telegram_id: int, actor: str = "admin") -> None:
         """Удаляет пользователя в панели. Локальная запись остаётся (trial_used, рефералы, платежи)."""
         user = await self._require_user(telegram_id)
         async with self._locks[user.id]:
@@ -737,7 +851,9 @@ class VPNService:
                 await self.remna.delete_user(user.remna_uuid)
             async with self.sm() as s:
                 await s.execute(update(User).where(User.id == user.id).values(remna_uuid=None))
+                await s.execute(delete(SubscriptionState).where(SubscriptionState.user_id == user.id))
                 await s.commit()
+        await self._event("user_deleted_panel", user_id=user.id, actor=actor)
 
     async def stats(self) -> dict:
         async with self.sm() as s:
@@ -753,3 +869,107 @@ class VPNService:
                 )
             ).all()
         return {"users": users, "with_sub": with_sub, "revenue": [(c, n, int(t or 0)) for c, n, t in rows]}
+
+    # ------------------------------------------------------------------ тарифы: правка и удаление (веб-панель)
+
+    async def update_plan(self, plan_id: int, *, title: str | None = None, days: int | None = None,
+                          sort_order: int | None = None) -> Plan:
+        async with self.sm() as s:
+            plan = await s.get(Plan, plan_id)
+            if plan is None:
+                raise VPNError("Тариф не найден.")
+            if title is not None:
+                title = title.strip()
+                if not title:
+                    raise VPNError("Название не может быть пустым.")
+                plan.title = title[:64]
+            if days is not None:
+                if days <= 0:
+                    raise VPNError("Срок тарифа должен быть больше нуля.")
+                plan.days = days
+            if sort_order is not None:
+                plan.sort_order = sort_order
+            await s.commit()
+            return plan
+
+    async def remove_price(self, plan_id: int, currency: str) -> None:
+        async with self.sm() as s:
+            plan = await s.get(Plan, plan_id)
+            if plan is None:
+                raise VPNError("Тариф не найден.")
+            for p in list(plan.prices):
+                if p.currency == currency:
+                    plan.prices.remove(p)
+                    await s.commit()
+                    return
+        raise VPNError("Такой цены у тарифа нет.")
+
+    async def delete_plan(self, plan_id: int) -> None:
+        """Удаляет тариф, только если по нему не было платежей (иначе — скрыть)."""
+        async with self.sm() as s:
+            plan = await s.get(Plan, plan_id)
+            if plan is None:
+                raise VPNError("Тариф не найден.")
+            used = (
+                await s.execute(select(func.count()).select_from(Payment).where(Payment.plan_id == plan_id))
+            ).scalar_one()
+            if used:
+                raise VPNError(f"По тарифу уже {used} платежей — удалять нельзя, скройте его.")
+            await s.delete(plan)
+            await s.commit()
+
+    # ------------------------------------------------------------------ вход в веб-панель
+
+    @staticmethod
+    def _token_hash(raw: str) -> str:
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    async def create_login_token(self, admin_tg_id: int, ttl_minutes: int = 5) -> str:
+        raw = secrets.token_urlsafe(32)
+        now = utcnow()
+        async with self.sm() as s:
+            await s.execute(delete(WebLoginToken).where(WebLoginToken.expires_at < now - timedelta(days=1)))
+            s.add(WebLoginToken(token_hash=self._token_hash(raw), admin_tg_id=admin_tg_id,
+                                expires_at=now + timedelta(minutes=ttl_minutes)))
+            await s.commit()
+        return raw
+
+    async def consume_login_token(self, raw: str) -> int | None:
+        """Возвращает Telegram ID админа и «сжигает» токен; None — токен неверный, просрочен или уже использован."""
+        if not raw or len(raw) > 128:
+            return None
+        now = utcnow()
+        async with self.sm() as s:
+            row = (
+                await s.execute(select(WebLoginToken).where(WebLoginToken.token_hash == self._token_hash(raw)))
+            ).scalar_one_or_none()
+            if row is None or row.used_at is not None or ensure_utc(row.expires_at) <= now:
+                return None
+            res = await s.execute(
+                update(WebLoginToken).where(WebLoginToken.id == row.id, WebLoginToken.used_at.is_(None)).values(used_at=now)
+            )
+            await s.commit()
+            return row.admin_tg_id if res.rowcount == 1 else None
+
+    # ------------------------------------------------------------------ синхронизация сроков с панелью
+
+    async def sync_subscriptions(self, pause: float = 0.15) -> int:
+        """Обновляет локальный снимок сроков подписок из панели. При недоступной панели тихо прекращает."""
+        from .remnawave import RemnawaveError
+
+        async with self.sm() as s:
+            rows = (await s.execute(select(User.id, User.remna_uuid).where(User.remna_uuid.is_not(None)))).all()
+        done = 0
+        for uid, ruuid in rows:
+            try:
+                ru = await self.remna.get_user(ruuid)
+            except RemnawaveError as e:
+                log.warning("Синхронизация сроков прервана: %s", e)
+                break
+            if ru is None:
+                await self._save_state(uid, None, "MISSING")
+            else:
+                await self._save_state(uid, parse_dt(ru.get("expireAt")), ru.get("status"))
+            done += 1
+            await asyncio.sleep(pause)
+        return done

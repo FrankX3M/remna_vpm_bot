@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% block title %}Тарифы{% endblock %}
+{% block body %}
+<h1>Тарифы</h1>
+{% for r in plans %}{% set p = r.plan if r.plan is defined else r %}
+<div class="card">
+<h2>#{{ p.id }} {{ p.title }} {% if p.is_active %}<span class="tag ok">виден</span>{% else %}<span class="tag er">скрыт</span>{% endif %}
+<span class="mut" style="font-weight:400"> · платежей: {{ r.payments }}</span></h2>
+<form method="post" action="/plans/{{ p.id }}/edit"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Название</label><input type="text" name="title" value="{{ p.title }}" maxlength="64"></div>
+<div><label>Дней</label><input type="number" name="days" value="{{ p.days }}" min="1"></div>
+<div><label>Порядок</label><input type="number" name="sort_order" value="{{ p.sort_order }}"></div>
+<div class="fit"><button>Сохранить</button></div></div></form>
+<h3>Цены</h3>
+<table><tr><th>Валюта</th><th>Сумма</th><th></th></tr>
+{% for cur, amt in r.prices.items() %}<tr><td>{{ cur }}</td><td>{{ amt }}</td><td>
+<form class="inline" method="post" action="/plans/{{ p.id }}/price/{{ cur }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="lnk">удалить</button></form></td></tr>
+{% else %}<tr><td colspan="3" class="mut">Цен нет — тариф не получится купить.</td></tr>{% endfor %}</table>
+<form method="post" action="/plans/{{ p.id }}/price"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Валюта (XTR = Stars)</label><input type="text" name="currency" value="XTR" maxlength="8"></div>
+<div><label>Сумма</label><input type="number" name="amount" min="1" required></div>
+<div class="fit"><button class="sec">Задать / изменить цену</button></div></div></form>
+<div class="row" style="margin-top:12px">
+<form class="inline fit" method="post" action="/plans/{{ p.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sec">{{ 'Скрыть' if p.is_active else 'Показать' }}</button></form>
+<form class="inline" method="post" action="/plans/{{ p.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label style="display:inline;font-weight:400"><input type="checkbox" name="confirm" value="yes"> Подтверждаю удаление</label> <button class="dng">Удалить</button></form></div>
+{% if r.payments %}<div class="help">У тарифа есть платежи — удаление может быть отклонено; лучше скрыть.</div>{% endif %}
+</div>
+{% else %}<div class="card mut">Тарифов пока нет.</div>{% endfor %}
+<div class="card"><h2>Новый тариф</h2>
+<form method="post" action="/plans/add"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Название</label><input type="text" name="title" required maxlength="64"></div>
+<div><label>Дней</label><input type="number" name="days" min="1" required></div>
+<div><label>Цена</label><input type="number" name="amount" min="1" required></div>
+<div><label>Валюта</label><input type="text" name="currency" value="XTR" maxlength="8"></div>
+<div class="fit"><button>Добавить</button></div></div></form></div>
+{% endblock %}

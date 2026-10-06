@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% block title %}Промокоды{% endblock %}
+{% block body %}
+<h1>Промокоды</h1>
+<div class="card"><h2>Как это работает</h2>
+<ul>
+<li><b>Бесплатные дни</b> — значение = число дней, добавляются к подписке сразу при вводе кода.</li>
+<li><b>Скидка на тариф</b> — значение = процент (1–99). Пользователь вводит код, скидка показывается в меню и применяется к следующей покупке; код расходуется после оплаты.</li>
+<li><b>Пробный период</b> — значение = число дней. Выдаётся один раз на аккаунт, независимо от кнопки «Пробный период».</li>
+<li><b>Аудитория:</b> «новички» — ещё ни разу не платили, «старички» — уже платили, «все» — без ограничений.</li>
+<li><b>Лимиты:</b> «всего» — общее число активаций (0 = без лимита), «на человека» — сколько раз один пользователь может использовать код, «до» — последний день действия.</li>
+<li>Пользователи вводят код кнопкой «🎟 Промокод» в боте или командой <code>/promo</code>. Текст подсказки и лимит неверных попыток — в «Настройках».</li>
+</ul></div>
+<div class="card"><h2>Новый промокод</h2>
+<form method="post" action="/promos/create"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Код</label><input type="text" name="code" required maxlength="32" placeholder="SPRING30"></div>
+<div><label>Тип</label><select name="kind">{% for k in kind_list %}<option value="{{ k }}">{{ kinds[k] }}</option>{% endfor %}</select></div>
+<div><label>Значение</label><input type="number" name="value" min="1" required></div>
+<div><label>Аудитория</label><select name="audience">{% for a in aud_list %}<option value="{{ a }}">{{ auds[a] }}</option>{% endfor %}</select></div></div>
+<div class="row"><div><label>Всего активаций (0 = ∞)</label><input type="number" name="max_total" value="0" min="0"></div>
+<div><label>На человека</label><input type="number" name="per_user" value="1" min="1"></div>
+<div><label>Действует до (необязательно)</label><input type="date" name="until"></div>
+<div class="fit"><button>Создать</button></div></div></form></div>
+<div class="card"><div class="scroll"><table>
+<tr><th>Код</th><th>Тип / значение</th><th>Аудитория</th><th>Использовано</th><th>Привлечено</th><th>Купили</th><th>Скидка на руках</th><th>Статус</th></tr>
+{% for r in stats %}{% set p = r.promo %}<tr>
+<td><a href="/promos/{{ p.code }}">{{ p.code }}</a></td>
+<td>{{ kinds[p.kind] }}: {{ p.value }}{{ '%' if p.kind == 'discount' else ' дн.' }}</td><td>{{ auds[p.audience] }}</td>
+<td>{{ r.used }}{% if p.max_total %} / {{ p.max_total }}{% endif %}</td><td>{{ r.attributed }}</td><td>{{ r.buyers }}</td><td>{{ r.pending }}</td>
+<td>{% if not p.is_active %}<span class="tag er">выключен</span>{% elif r.expired %}<span class="tag er">истёк</span>{% else %}<span class="tag ok">активен</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">Промокодов пока нет.</td></tr>{% endfor %}</table></div></div>
+{% endblock %}

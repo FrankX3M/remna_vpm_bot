@@ -1,0 +1,33 @@
+{% extends "base.html" %}{% block title %}Пользователь {{ c.user.telegram_id }}{% endblock %}
+{% block body %}{% set u = c.user %}
+<p><a href="/users">← Пользователи</a></p>
+<h1>{{ '@' ~ u.tg_username if u.tg_username else u.telegram_id }} <span class="mut" style="font-weight:400">{{ u.telegram_id }}</span></h1>
+<div class="grid">
+<div class="kpi"><b>{{ sources.get(u.source, u.source) }}</b><span>источник{% if c.source_promo %}: <a href="/promos/{{ c.source_promo.code }}">{{ c.source_promo.code }}</a>{% endif %}</span></div>
+<div class="kpi"><b>{{ u.created_at|date }}</b><span>регистрация</span></div>
+<div class="kpi"><b>{{ 'да' if u.trial_used else 'нет' }}</b><span>брал пробный</span></div>
+<div class="kpi"><b>{{ c.invited }}</b><span>приглашено</span></div>
+<div class="kpi"><b>{% if c.referrer %}<a href="/users/{{ c.referrer.telegram_id }}">{{ '@' ~ c.referrer.tg_username if c.referrer.tg_username else c.referrer.telegram_id }}</a>{% else %}—{% endif %}</b><span>кто пригласил</span></div>
+</div>
+<div class="card"><h2>Подписка</h2>
+{% if panel %}<p>В панели: статус <b>{{ panel.get('status', '—') }}</b>, действует до <b>{{ panel.get('expireAt', '—') }}</b></p>
+{% elif panel_error %}<p class="err">Панель недоступна: {{ panel_error }}</p>
+{% else %}<p class="mut">В панели пользователя ещё нет.</p>{% endif %}
+{% if c.state %}<p class="mut">Локальный снимок: до {{ c.state.expire_at|dt }} ({{ c.state.status or '—' }}), обновлён {{ c.state.synced_at|dt }}</p>{% endif %}
+<form method="post" action="/users/{{ u.telegram_id }}/extend"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Продлить на дней</label><input type="number" name="days" min="1" value="30"></div><div class="fit"><button>Продлить</button></div></div></form>
+<form method="post" action="/users/{{ u.telegram_id }}/delete" style="margin-top:12px"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label style="display:inline;font-weight:400"><input type="checkbox" name="confirm" value="yes"> Подтверждаю удаление в панели</label> <button class="dng">Удалить в панели</button></form>
+</div>
+<div class="card"><h2>Платежи</h2><div class="scroll"><table><tr><th>#</th><th>Дата</th><th>Тариф</th><th>Сумма</th><th>Скидка</th><th>Выдано</th></tr>
+{% for p, title in c.payments %}<tr><td>{{ p.id }}</td><td>{{ p.created_at|dt }}</td><td>{{ title or '—' }} ({{ p.days }} дн.)</td><td>{{ p.amount|money(p.currency) }}</td>
+<td>{% if p.discount_percent %}−{{ p.discount_percent }}% (было {{ p.list_amount }}){% else %}—{% endif %}</td><td>{{ '✓' if p.granted else '✗' }}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">Платежей нет.</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Промокоды</h2><div class="scroll"><table><tr><th>Дата</th><th>Код</th><th>Тип</th><th>Статус</th></tr>
+{% for r, pr in c.redemptions %}<tr><td>{{ r.created_at|dt }}</td><td><a href="/promos/{{ pr.code }}">{{ pr.code }}</a></td><td>{{ kinds[pr.kind] }} {{ pr.value }}</td><td>{{ 'ждёт оплаты' if r.status == 'pending' else 'использован' }}</td></tr>
+{% else %}<tr><td colspan="4" class="mut">Не использовал.</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>События</h2><div class="scroll"><table><tr><th>Когда</th><th>Событие</th><th>Подробности</th><th>Кто</th></tr>
+{% for e in c.events %}<tr><td>{{ e.ts|dt }}</td><td>{{ event_titles.get(e.type, e.type) }}</td>
+<td>{% if e.reason %}{{ e.reason }} {% endif %}{% if e.days %}+{{ e.days }} дн. {% endif %}{% if e.expire_after %}→ {{ e.expire_after|date }}{% endif %}</td><td class="mut">{{ e.actor }}</td></tr>
+{% else %}<tr><td colspan="4" class="mut">Событий нет.</td></tr>{% endfor %}</table></div></div>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}{% block title %}Промокод {{ c.promo.code }}{% endblock %}
+{% block body %}{% set p = c.promo %}{% set st = c.stats %}
+<p><a href="/promos">← Все промокоды</a></p>
+<h1>{{ p.code }} {% if p.is_active %}<span class="tag ok">активен</span>{% else %}<span class="tag er">выключен</span>{% endif %}</h1>
+<p>{{ kinds[p.kind] }}: <b>{{ p.value }}{{ '%' if p.kind == 'discount' else ' дн.' }}</b> · создан {{ p.created_at|date }}</p>
+{% if st %}<div class="grid"><div class="kpi"><b>{{ st.used }}</b><span>использовано</span></div><div class="kpi"><b>{{ st.unique }}</b><span>уникальных людей</span></div>
+<div class="kpi"><b>{{ st.attributed }}</b><span>пришли с этим кодом</span></div><div class="kpi"><b>{{ st.buyers }}</b><span>из них купили</span></div>
+<div class="kpi"><b>{{ st.pending }}</b><span>скидка на руках</span></div><div class="kpi"><b>{{ st.active_now }}</b><span>подписка активна сейчас</span></div></div>
+{% if st.revenue %}<p>Выручка по платежам с кодом: {% for r in st.revenue %}{{ r.sum|money(r.currency) }} ({{ r.count }}){% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}{% endif %}
+<div class="card"><h2>Параметры</h2>
+<form method="post" action="/promos/{{ p.code }}/edit"><input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="row"><div><label>Значение</label><input type="number" name="value" value="{{ p.value }}" min="1"></div>
+<div><label>Аудитория</label><select name="audience">{% for a in aud_list %}<option value="{{ a }}" {{ 'selected' if a == p.audience }}>{{ auds[a] }}</option>{% endfor %}</select></div>
+<div><label>Всего активаций (0 = ∞)</label><input type="number" name="max_total" value="{{ p.max_total }}" min="0"></div>
+<div><label>На человека</label><input type="number" name="per_user" value="{{ p.per_user }}" min="1"></div>
+<div><label>Действует до</label><input type="date" name="until" value="{{ p.expires_at.strftime('%Y-%m-%d') if p.expires_at else '' }}"></div>
+<div class="fit"><button>Сохранить</button></div></div></form>
+<div class="row" style="margin-top:12px">
+<form class="inline fit" method="post" action="/promos/{{ p.code }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="sec">{{ 'Выключить' if p.is_active else 'Включить' }}</button></form>
+<form class="inline" method="post" action="/promos/{{ p.code }}/delete"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label style="display:inline;font-weight:400"><input type="checkbox" name="confirm" value="yes"> Подтверждаю удаление</label> <button class="dng">Удалить</button></form></div></div>
+<div class="card"><h2>Последние активации</h2><div class="scroll"><table><tr><th>Когда</th><th>Пользователь</th><th>Статус</th></tr>
+{% for red, tg, un in c.redemptions %}<tr><td>{{ red.created_at|dt }}</td><td><a href="/users/{{ tg }}">{{ '@' ~ un if un else tg }}</a></td>
+<td>{{ 'ждёт оплаты' if red.status == 'pending' else 'использован' }}</td></tr>
+{% else %}<tr><td colspan="3" class="mut">Пока никто не использовал.</td></tr>{% endfor %}</table></div></div>
+{% endblock %}

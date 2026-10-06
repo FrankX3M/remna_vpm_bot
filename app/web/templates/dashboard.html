@@ -1,0 +1,41 @@
+{% extends "base.html" %}{% block title %}Обзор{% endblock %}
+{% block body %}
+<h1>Обзор <form class="inline" method="get"><select name="days" style="width:auto;display:inline">
+{% for n in [7,30,90,365] %}<option value="{{ n }}" {{ 'selected' if n==days }}>за {{ n }} дн.</option>{% endfor %}</select> <button class="sec">Показать</button></form></h1>
+<div class="grid">
+<div class="kpi"><b>{{ d.users.total }}</b><span>всего пользователей</span></div>
+<div class="kpi"><b>{{ d.users.new }}</b><span>новички (не платили)</span></div>
+<div class="kpi"><b>{{ d.users.old }}</b><span>старички (платили)</span></div>
+<div class="kpi"><b>{{ d.users.repeat }}</b><span>платили повторно</span></div>
+<div class="kpi"><b>{{ d.users.registered_period }}</b><span>новых за {{ days }} дн.</span></div>
+<div class="kpi"><b>{{ d.users.trial_used }}</b><span>брали пробный (из них купили: {{ d.users.trial_paid }})</span></div>
+<div class="kpi"><b>{{ d.subs.active }}</b><span>подписок активно (истекают за 7 дн.: {{ d.subs.soon }})</span></div>
+<div class="kpi"><b>{{ d.subs.expired }}</b><span>истекло</span></div>
+<div class="kpi"><b>{{ d.discount_holders }}</b><span>с неиспользованной скидкой</span></div>
+<div class="kpi"><b class="{{ 'wa' if d.pending_payments }}">{{ d.pending_payments }}</b><span><a href="/payments?status=pending">платежей без выдачи</a></span></div>
+</div>
+<p class="mut">Подписки считаются по локальному снимку панели (синхронизация: {{ d.subs.last_sync|dt }}). Нет снимка: {{ d.subs.unknown }}, ещё не получали подписку: {{ d.subs.never }}.</p>
+
+<div class="card"><h2>Откуда пришли пользователи</h2><div class="scroll"><table>
+<tr><th>Источник</th><th>Пользователей</th><th>Купили</th><th>Конверсия</th></tr>
+{% for r in d.sources %}<tr><td>{{ sources.get(r.source, r.source) }}</td><td>{{ r.users }}</td><td>{{ r.paid }}</td><td>{{ r.conv }}%</td></tr>{% endfor %}
+</table></div></div>
+
+<div class="card"><h2>Выручка</h2><div class="scroll"><table>
+<tr><th>Валюта</th><th>Платежей за {{ days }} дн.</th><th>Сумма</th><th>Скидок выдано на</th><th>Всего за всё время</th></tr>
+{% for r in d.revenue.period %}<tr><td>{{ r.currency }}</td><td>{{ r.count }}</td><td>{{ r.sum|money(r.currency) }}</td><td>{{ r.discount }}</td>
+<td>{% for t in d.revenue.total if t.currency == r.currency %}{{ t.sum|money(t.currency) }} ({{ t.count }}){% endfor %}</td></tr>
+{% else %}<tr><td colspan="5" class="mut">Платежей за период нет.</td></tr>{% endfor %}
+</table></div>
+{% if d.revenue_by_day %}<h3>По дням</h3><div class="scroll"><table><tr><th>День</th><th>Валюта</th><th>Платежей</th><th>Сумма</th></tr>
+{% for r in d.revenue_by_day[:31] %}<tr><td>{{ r.day }}</td><td>{{ r.currency }}</td><td>{{ r.count }}</td><td>{{ r.sum }}</td></tr>{% endfor %}</table></div>{% endif %}</div>
+
+<div class="card"><h2>Рефералы</h2><p>Приглашено: <b>{{ d.referrals.invited }}</b>, из них купили: <b>{{ d.referrals.paid }}</b></p>
+{% if d.referrals.top %}<div class="scroll"><table><tr><th>Пригласил</th><th>Приглашено</th><th>Оплатили (бонус выдан)</th></tr>
+{% for r in d.referrals.top %}<tr><td>{% if r.user %}<a href="/users/{{ r.user.telegram_id }}">{{ r.user.tg_username and '@' ~ r.user.tg_username or r.user.telegram_id }}</a>{% else %}—{% endif %}</td><td>{{ r.invited }}</td><td>{{ r.rewarded }}</td></tr>{% endfor %}</table></div>{% endif %}</div>
+
+<div class="card"><h2>Промокоды</h2><div class="scroll"><table>
+<tr><th>Код</th><th>Тип</th><th>Использовано</th><th>Привлечено</th><th>Купили</th><th>Скидка на руках</th></tr>
+{% for r in d.promos %}<tr><td><a href="/promos/{{ r.promo.code }}">{{ r.promo.code }}</a></td><td>{{ kinds[r.promo.kind] }}</td><td>{{ r.used }}</td><td>{{ r.attributed }}</td><td>{{ r.buyers }}</td><td>{{ r.pending }}</td></tr>
+{% else %}<tr><td colspan="6" class="mut">Промокодов нет.</td></tr>{% endfor %}</table></div></div>
+{% endblock %}
