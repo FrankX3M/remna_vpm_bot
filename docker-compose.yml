@@ -1,0 +1,48 @@
+# VPN-бот на ДОМАШНЕМ сервере рядом с панелью Remnawave.
+#   vpnbot    — сам бот.
+#   tg-egress — ОПЦИОНАЛЬНО (profile "egress"): Xray-клиент SOCKS5 -> VLESS Reality -> FIN. Нужен, только если у
+#               домашнего сервера нет западного выхода (Telegram в РФ заблокирован). Если сервер сидит в Wi-Fi/сети
+#               роутера с VPN — не нужен, бот ходит в Telegram напрямую (TELEGRAM_PROXY пуст). К панели ходит по docker-сети remnawave-network (http://remnawave:3000), туннель/TLS не нужны.
+# Ни один порт на хост не публикуется. Бот работает через long polling (только исходящие соединения) —
+# проброс портов на роутере по-прежнему не нужен.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: "3" }
+
+services:
+  tg-egress:
+    image: ghcr.io/xtls/xray-core:${XRAY_TAG:-latest}   # после проверки зафиксируйте точную версию в .env (XRAY_TAG)
+    container_name: tg-egress
+    profiles: ["egress"]                                # включается COMPOSE_PROFILES=egress (ставит 07-bot-home.sh)
+    restart: always
+    <<: *logging
+    volumes:
+      - ./egress:/usr/local/etc/xray:ro                 # config.json создаёт tools/vless2xray.py
+    networks: [bot-net]
+    mem_limit: 96m
+
+  vpnbot:
+    build: .
+    image: vpnbot:local
+    container_name: vpnbot
+    restart: always
+    <<: *logging
+    env_file: .env
+    volumes:
+      - ./data:/data
+    networks: [bot-net, remnawave-network]
+    mem_limit: 192m
+    healthcheck:
+      # маркер обновляется раз в минуту, только если Telegram реально отвечает через прокси
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime(os.environ.get('HEARTBEAT_FILE','/tmp/vpnbot.alive'))<180 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+networks:
+  bot-net:
+    name: vpnbot-net
+  remnawave-network:
+    external: true      # сеть панели из 06-panel-home.sh

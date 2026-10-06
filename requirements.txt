@@ -1,0 +1,8 @@
+aiogram>=3.13,<4
+aiohttp-socks>=0.9          # SOCKS5-прокси для выхода к Telegram (в РФ он заблокирован)
+SQLAlchemy[asyncio]>=2.0.30
+aiosqlite>=0.20
+httpx>=0.27
+pydantic-settings>=2.3
+# для PostgreSQL вместо SQLite: pip install asyncpg
+# и DATABASE_URL=postgresql+asyncpg://user:pass@host/db
