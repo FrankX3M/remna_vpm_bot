@@ -81,11 +81,33 @@ docker-compose.yml   vpnbot (+ tg-egress по профилю egress)
 по подтверждению оплаты вызвать `svc.process_payment(provider=..., external_id=...)`.
 Цены в новой валюте админ задаёт через `/setprice ID ЦЕНА ВАЛЮТА`.
 Вебхуки платёжек (карты/крипта) потребуют публичного адреса: его нужно вешать на VPS RU (Caddy → туннель → дом),
-а не открывать дом — это отдельный этап.
+а не открывать дом — так сделано для Trybit (см. ниже).
+
+## Оплата криптовалютой: Trybit
+Код: `app/payments/trybit_api.py` (клиент API v2, проверка JWT, логика POSTBACK; без зависимостей от aiogram/БД) и
+`app/payments/trybit.py` (провайдер, таблица заказов `trybit_orders`, кнопка «Проверить оплату», сверка раз в минуту).
+Документация Trybit: https://docs.trybit.com/ru.
+
+**Как включить.**
+1. В кабинете Trybit создайте проект «На своём сайте» → интеграция **API**. Ключи API KEY / SHOP ID / SECRET KEY — справа в настройках проекта.
+2. В `/opt/vpnbot/.env`: `TRYBIT_API_KEY`, `TRYBIT_SHOP_ID`, `TRYBIT_SECRET_KEY` (+ при желании `TRYBIT_CURRENCIES=USDT_TRC20,USDT_TON,TON`, `TRYBIT_INVOICE_MINUTES`). Затем `./07-bot-home.sh` (миграция `0002` создаётся автоматически).
+3. Цены в рублях: `/setprice ID СУММА RUB` (или веб-админка → Тарифы). Trybit пересчитает в крипту сам. Включение/выключение способа — «Настройки → Оплата».
+4. Поля формы Trybit «Интеграция»: URL успешной оплаты `https://t.me/<бот>?start=paid`, неудачной `https://t.me/<бот>?start=pay_failed`,
+   URL уведомлений `https://sub.1rtp.ru/pay/trybit/postback` (Caddy на VPS RU, фрагмент — `deploy/ru-caddy-trybit.snippet`).
+5. Тест: в проекте Trybit включён тестовый режим → в `.env` `TRYBIT_ALLOW_TEST=true` → купить тариф **через бота** → в кабинете «Платежи → Тестовые» →
+   «Подтвердить счёт без оплаты» → подписка выдана, в «Истории постбэков» ответ 200. После одобрения проекта: `TRYBIT_ALLOW_TEST=false`.
+
+**Как это устроено / безопасность.** POSTBACK (`/trybit/postback` на веб-порту бота, без сессии) принимается только с валидным JWT (HS256, SECRET KEY,
+обязателен `exp`); после этого статус и сумма **перезапрашиваются у API Trybit** — телу запроса не верим. Счёт привязан к заказу, сумма и валюта
+сверяются с заказом, выдача идемпотентна (захват `UPDATE ... WHERE status='pending'` + уникальность `payments(provider, external_id)`).
+`paid`/`overpaid` выдают подписку, `partial` — только уведомление админу и пользователю, `canceled` закрывает заказ. Если панель лежит —
+платёж остаётся `granted=False` (`/pending`, `/regrant`). Тестовые счета игнорируются, пока `TRYBIT_ALLOW_TEST=false`.
+Для приёма POSTBACK должна быть включена веб-часть (`WEB_ENABLED=true`); без неё платежи подхватит только сверка (раз в минуту).
+Тесты: `python test_trybit_core.py` (подпись и логика), `python test_trybit.py` (всё вместе на БД; `TEST_DATABASE_URL` — PostgreSQL).
 
 ## Важно знать
 - Клиент панели писан под Remnawave 2.x (в `06-panel-home.sh` тег `remnawave/backend:2`). При другой версии правьте только `app/remnawave.py`.
-- Таблицы создаются автоматически (`create_all`). Для изменений схемы в будущем подключите Alembic.
+- Схема БД: PostgreSQL — миграции Alembic при старте (`app/migrations`, сейчас 0001, 0002 — Trybit); SQLite (тесты) — `create_all`.
 - Блокировки на пользователя работают внутри одного процесса: запускайте один экземпляр бота.
 - Возвраты Stars: `telegram_payment_charge_id` хранится в `payments.external_id`.
 - Режим direct зависит от VPN на роутере (включите kill-switch); режим egress — от доступности FIN. Без выхода к Telegram бот недоступен. Платежи не теряются: Stars-оплата проходит на стороне

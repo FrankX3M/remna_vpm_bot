@@ -129,6 +129,12 @@ async def cmd_start(message: Message, command: CommandObject, svc: VPNService, s
     if command.args and command.args.startswith("ref_") and command.args[4:].isdigit():
         ref_id = int(command.args[4:])
     await svc.register(message.from_user.id, message.from_user.username, ref_id)
+    # возврат со страницы оплаты Trybit (URL успешной/неудачной оплаты в проекте Trybit)
+    if command.args == "paid":
+        await message.answer("✅ Спасибо! Платёж обрабатывается — как только сеть подтвердит перевод "
+                             "(обычно 1–5 минут), я пришлю сообщение, и подписка станет активной.")
+    elif command.args == "pay_failed":
+        await message.answer("❌ Оплата не прошла или счёт истёк. Выберите тариф и попробуйте снова.")
     await show_menu(message, svc, settings, store)
 
 

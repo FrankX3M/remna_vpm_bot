@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -85,6 +85,29 @@ class Payment(Base):
     discount_percent: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     promo_id: Mapped[int | None] = mapped_column(ForeignKey("promo_codes.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrybitOrder(Base):
+    """Счёт Trybit в ожидании оплаты. Payment появляется только после подтверждения (process_payment), а этот
+    заказ хранит всё, что нужно для выдачи: пользователя, тариф, скидку, сумму и привязку к счёту у провайдера."""
+
+    __tablename__ = "trybit_orders"
+    __table_args__ = (Index("ix_trybit_orders_status", "status", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)          # = order_id в Trybit
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"))
+    redemption_id: Mapped[int | None] = mapped_column(Integer)
+    amount: Mapped[int] = mapped_column(Integer)                # со скидкой, в `currency`
+    currency: Mapped[str] = mapped_column(String(8))
+    invoice_uuid: Mapped[str | None] = mapped_column(String(32), unique=True)   # INV-XXXXXXXX
+    link: Mapped[str | None] = mapped_column(String(255))
+    # pending | paid | canceled (истёк/отменён) | error (оплачен, но не обработан — разбирает админ)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
+    partial_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PromoCode(Base):

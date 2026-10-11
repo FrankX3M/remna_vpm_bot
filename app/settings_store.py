@@ -171,6 +171,8 @@ REGISTRY: list[Def] = [
     Def("promo_fail_window_min", "promo", "Окно блокировки, минут", "int", 10, min=1, max=1440),
     # --- оплата
     Def("pay_stars_enabled", "payments", "Оплата Telegram Stars включена", "bool", True),
+    Def("pay_trybit_enabled", "payments", "Оплата криптовалютой (Trybit) включена", "bool", True,
+        "Работает, если в .env заданы TRYBIT_API_KEY / TRYBIT_SHOP_ID / TRYBIT_SECRET_KEY. Цены — в рублях: /setprice ID СУММА RUB."),
     Def("invoice_description", "payments", "Описание в счёте", "str", INVOICE_DESC_DEFAULT,
         "Telegram ограничивает описание 255 символами.", placeholders="{days} — срок тарифа в днях"),
     # --- меню

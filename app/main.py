@@ -14,9 +14,10 @@ from .config import Settings
 from .db import make_engine
 from .handlers import admin, errors, user
 from .migrate import run_migrations
-from .payments import stars
+from .payments import stars, trybit
 from .payments.stars import StarsProvider
 from .remnawave import RemnawaveClient
+from .payments.trybit_api import TrybitService
 from .services import VPNService
 from .settings_store import SettingsStore
 
@@ -112,14 +113,29 @@ async def main() -> None:
     remna = RemnawaveClient(settings.remnawave_url, settings.remnawave_token, settings.remnawave_behind_proxy)
     svc = VPNService(sessionmaker, remna, settings, store)
 
+    bot = make_bot(settings)
+
     # Новый способ оплаты = новый провайдер здесь + свой router (если нужен) ниже
     providers = {p.name: p for p in (StarsProvider(),)}
+    extra: dict = {}
+    trybit_service = trybit_store = None
+    if settings.trybit_enabled:
+        trybit_cfg = trybit.make_config(settings)
+        trybit_store = trybit.TrybitStore(sessionmaker, svc, bot, settings.admin_id_set)
+        trybit_service = TrybitService(trybit_cfg, trybit_store)
+        providers["trybit"] = trybit.TrybitProvider(trybit_service, trybit_store, trybit_cfg.invoice_ttl_minutes)
+        extra = {"trybit_service": trybit_service, "trybit_store": trybit_store}
+        if settings.trybit_allow_test:
+            log.warning("TRYBIT_ALLOW_TEST=true: принимаются ТЕСТОВЫЕ счета (без реальной оплаты). Перед боем выключите!")
+        if not settings.web_enabled:
+            log.warning("Trybit включён, но WEB_ENABLED=false: POSTBACK принимать некому (сверка раз в минуту всё равно сработает).")
 
-    bot = make_bot(settings)
-    dp = Dispatcher(svc=svc, settings=settings, store=store, providers=providers)
+    dp = Dispatcher(svc=svc, settings=settings, store=store, providers=providers, **extra)
     dp.include_router(errors.router)
     dp.include_router(admin.router)
     dp.include_router(stars.router)
+    if trybit_service:
+        dp.include_router(trybit.router)
     dp.include_router(user.router)
 
     background: list[asyncio.Task] = [
@@ -129,7 +145,9 @@ async def main() -> None:
     if settings.web_enabled:
         from .web.server import run_web   # импорт здесь: веб можно выключить, не ставя его зависимости
 
-        background.append(asyncio.create_task(run_web(svc, settings, store, bot), name="web"))
+        background.append(asyncio.create_task(run_web(svc, settings, store, bot, trybit_service), name="web"))
+    if trybit_service:
+        background.append(asyncio.create_task(trybit.reconcile_loop(trybit_service, trybit_store), name="trybit-reconcile"))
     hb: asyncio.Task | None = None
     try:
         await wait_for_telegram(bot)

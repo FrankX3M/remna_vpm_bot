@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     web_allowed_hosts: str = ""        # допустимые Host через запятую (пусто = хост из WEB_BASE_URL + localhost)
     web_session_hours: int = 12
 
+    # --- оплата криптовалютой через Trybit (https://docs.trybit.com/ru). Пусто = способ оплаты выключен.
+    # Постбэк принимается на WEB-порту бота: /trybit/postback (наружу его публикует Caddy на VPS RU).
+    trybit_api_key: str = ""
+    trybit_shop_id: str = ""
+    trybit_secret_key: str = ""          # SECRET KEY проекта: подпись JWT в POSTBACK
+    trybit_invoice_minutes: int = 60     # срок жизни счёта
+    trybit_currencies: str = ""          # разрешённые монеты через запятую (USDT_TRC20,USDT_TON,TON); пусто = все
+    trybit_allow_test: bool = False      # принимать тестовые счета (только на время проверки в Trybit!)
+
     # Значения по умолчанию для настроек, которые админ меняет в веб-панели (см. settings_store.py).
     # Если в панели значение не задано — действует то, что стоит здесь.
     trial_days: int = 30
@@ -43,6 +52,10 @@ class Settings(BaseSettings):
     @property
     def admin_id_set(self) -> set[int]:
         return {int(x) for x in self.admin_ids.replace(" ", "").split(",") if x}
+
+    @property
+    def trybit_enabled(self) -> bool:
+        return bool(self.trybit_api_key and self.trybit_shop_id and self.trybit_secret_key)
 
     @property
     def squad_list(self) -> list[str]:

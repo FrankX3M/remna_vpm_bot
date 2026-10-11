@@ -63,7 +63,7 @@ def _int(v, default=0) -> int:
         return default
 
 
-def build_app(svc: VPNService, settings: Settings, store: SettingsStore, bot=None) -> Starlette:
+def build_app(svc: VPNService, settings: Settings, store: SettingsStore, bot=None, trybit=None) -> Starlette:
     templates = Jinja2Templates(directory=str(TEMPLATES))
     templates.env.autoescape = True
     templates.env.filters["dt"] = lambda v: fmt_dt(v) if v else "—"
@@ -476,6 +476,11 @@ def build_app(svc: VPNService, settings: Settings, store: SettingsStore, bot=Non
         Route("/payments/{pid:int}/regrant", payment_regrant, methods=["POST"]),
         Route("/audit", audit_page),
     ]
+    if trybit is not None:
+        # POSTBACK Trybit: публичный (через Caddy на VPS RU), без сессии/CSRF — защита: подпись JWT + перезапрос счёта у API
+        from ..payments.trybit import postback_endpoint
+
+        routes.append(Route("/trybit/postback", postback_endpoint(trybit), methods=["POST"]))
     secret = settings.web_secret or secrets.token_hex(32)
     middleware = [
         Middleware(TrustedHostMiddleware, allowed_hosts=sorted(settings.web_hosts)),
@@ -491,8 +496,8 @@ def build_app(svc: VPNService, settings: Settings, store: SettingsStore, bot=Non
     return Starlette(routes=routes, middleware=middleware, exception_handlers={404: not_found})
 
 
-async def run_web(svc: VPNService, settings: Settings, store: SettingsStore, bot=None) -> None:
-    app = build_app(svc, settings, store, bot)
+async def run_web(svc: VPNService, settings: Settings, store: SettingsStore, bot=None, trybit=None) -> None:
+    app = build_app(svc, settings, store, bot, trybit)
     config = uvicorn.Config(app, host=settings.web_host, port=settings.web_port, log_level="warning", access_log=False,
                             server_header=False, date_header=False, proxy_headers=False)
     server = uvicorn.Server(config)

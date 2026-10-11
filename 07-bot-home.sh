@@ -137,7 +137,7 @@ if [[ "$(realpath "$SRC_DIR")" != "$(realpath "$APP_DIR")" ]]; then
   # код обновляем целиком, но .env, data/ и egress/config.json (секреты и состояние) не трогаем
   rm -rf "$APP_DIR/app" "$APP_DIR/tools"
   cp -a "$SRC_DIR/app" "$SRC_DIR/tools" "$APP_DIR/"
-  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_egress.py 07-bot-home.sh; do
+  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_bot.py test_trybit.py test_trybit_core.py test_egress.py 07-bot-home.sh; do
     [[ -f "$SRC_DIR/$f" ]] && cp -a "$SRC_DIR/$f" "$APP_DIR/$f"
   done
   find "$APP_DIR" -name __pycache__ -type d -prune -exec rm -rf {} +
@@ -353,6 +353,11 @@ LISTEN="$(ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -E ':1080$' || true)"
 log "Бот запущен и проверен."
 echo
 warn "Дальше:"
+if grep -qE '^TRYBIT_API_KEY=.+' "$ENV_FILE" 2>/dev/null; then
+  warn "  Trybit: POSTBACK принимается на https://$WEB_DOMAIN/trybit/postback (внутри туннеля). Публичный адрес для кабинета Trybit — Caddy на VPS RU, см. deploy/ru-caddy-trybit.snippet и README."
+else
+  warn "  Trybit (оплата криптой): впишите TRYBIT_API_KEY / TRYBIT_SHOP_ID / TRYBIT_SECRET_KEY в $ENV_FILE и повторите запуск; цены в рублях: /setprice ID СУММА RUB."
+fi
 warn "  0) Веб-админка: на устройстве админа добавьте в hosts строку  $TUNNEL_IP $WEB_DOMAIN  (туннель AWG включён), затем отправьте боту /web — придёт одноразовая ссылка. Все параметры (пробный период, рефералы, тексты, инструкции, тарифы, промокоды) — в разделе «Настройки»."
 warn "  1) В Telegram откройте бота, отправьте /start и /admin. Тарифы можно вести в веб-админке (раздел «Тарифы»)."
 warn "  2) Зафиксируйте версии: docker compose images  ->  XRAY_TAG=... в $APP_DIR/.env"

@@ -1,0 +1,25 @@
+# Публичный POSTBACK Trybit: добавить в сайт sub.1rtp.ru в Caddyfile на VPS RU (ДО общего reverse_proxy сайта).
+# Путь снаружи:  https://sub.1rtp.ru/pay/trybit/postback  ->  туннель AWG  ->  Caddy панели 10.66.0.2:443 (сайт bot.1rtp.ru)
+#                -> vpnbot:8088 /trybit/postback
+# Этот адрес вписывается в «URL для уведомлений» проекта Trybit.
+# Нужно: ACL RU -> дом:443 (уже есть для Subscription Page), имя bot.1rtp.ru в сертификате панели.
+
+	@trybit path /pay/trybit/postback
+	handle @trybit {
+		@notpost not method POST
+		respond @notpost 405
+		request_body {
+			max_size 64KB
+		}
+		rewrite * /trybit/postback
+		reverse_proxy https://10.66.0.2:443 {
+			header_up Host bot.1rtp.ru
+			transport http {
+				tls_server_name bot.1rtp.ru
+			}
+		}
+	}
+
+# Проверка с интернета (ответ 401 Invalid token = цепочка работает, подпись не пройдена, как и должно быть):
+#   curl -sS -X POST https://sub.1rtp.ru/pay/trybit/postback -H 'Content-Type: application/json' \
+#        -d '{"status":"success","invoice_id":"X","order_id":"1","token":"x"}'
