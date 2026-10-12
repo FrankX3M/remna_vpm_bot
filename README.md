@@ -103,11 +103,15 @@ docker-compose.yml   vpnbot (+ tg-egress по профилю egress)
 `paid`/`overpaid` выдают подписку, `partial` — только уведомление админу и пользователю, `canceled` закрывает заказ. Если панель лежит —
 платёж остаётся `granted=False` (`/pending`, `/regrant`). Тестовые счета игнорируются, пока `TRYBIT_ALLOW_TEST=false`.
 Для приёма POSTBACK должна быть включена веб-часть (`WEB_ENABLED=true`); без неё платежи подхватит только сверка (раз в минуту).
-Тесты: `python test_trybit_core.py` (подпись и логика), `python test_trybit.py` (всё вместе на БД; `TEST_DATABASE_URL` — PostgreSQL).
+**Выбор оплаты в боте.** «Купить» → способ оплаты (показываются только включённые в «Настройки → Оплата» и имеющие цену хотя бы у одного тарифа;
+один способ — шаг пропускается) → тариф → для крипты выбор монеты/сети из `TRYBIT_CURRENCIES` (дешёвые сети первыми; монета уходит в
+Trybit как `add_fields.cryptocurrency`). Новый способ (карты) подключается классом `PaymentProvider` + регистрацией в `main.py` — в меню он появится сам,
+когда включён и у тарифов есть цена в его валюте (`options()` у провайдера — необязательный подвыбор вроде монеты).
+Тесты: `python test_trybit_core.py` (подпись и логика), `python test_pay_menu.py` (меню выбора оплаты), `python test_trybit.py` (всё вместе на БД; `TEST_DATABASE_URL` — PostgreSQL).
 
 ## Важно знать
 - Клиент панели писан под Remnawave 2.x (в `06-panel-home.sh` тег `remnawave/backend:2`). При другой версии правьте только `app/remnawave.py`.
-- Схема БД: PostgreSQL — миграции Alembic при старте (`app/migrations`, сейчас 0001, 0002 — Trybit); SQLite (тесты) — `create_all`.
+- Схема БД: PostgreSQL — миграции Alembic при старте (`app/migrations`, сейчас 0001, 0002 — Trybit, 0003 — монета заказа); SQLite (тесты) — `create_all`.
 - Блокировки на пользователя работают внутри одного процесса: запускайте один экземпляр бота.
 - Возвраты Stars: `telegram_payment_charge_id` хранится в `payments.external_id`.
 - Режим direct зависит от VPN на роутере (включите kill-switch); режим egress — от доступности FIN. Без выхода к Telegram бот недоступен. Платежи не теряются: Stars-оплата проходит на стороне

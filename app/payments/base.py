@@ -30,10 +30,15 @@ class PaymentProvider(ABC):
     def format_price(self, amount: int) -> str:
         return f"{amount} {self.currency}"
 
+    def options(self) -> list[tuple[str, str]]:
+        """Подвыбор внутри способа оплаты: [(код, подпись кнопки)]. Пусто — подвыбора нет (например, у Stars).
+        Выбранный код приходит в start(option=...)."""
+        return []
+
     @abstractmethod
     async def start(
         self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
-        description: str | None = None,
+        description: str | None = None, option: str | None = None,
     ) -> None:
         """Показать пользователю счёт / ссылку на оплату.
         amount — уже с учётом скидки; redemption_id (активация промокода-скидки) нужно положить в payload через

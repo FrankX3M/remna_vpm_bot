@@ -171,57 +171,96 @@ async def cb_trial(cb: CallbackQuery, svc: VPNService, store: SettingsStore) -> 
 
 # ---------------------------------------------------------------- покупка
 
-def _price_label(plan, providers: dict[str, PaymentProvider], percent: int = 0) -> str:
-    parts = []
-    for p in providers.values():
-        amount = plan.price(p.currency)
-        if amount:
-            parts.append(p.format_price(apply_discount(amount, percent) if percent else amount))
-    return " / ".join(parts)
+async def _priced_providers(svc: VPNService, store: SettingsStore,
+                            providers: dict[str, PaymentProvider]) -> dict[str, PaymentProvider]:
+    """Способы оплаты, которые реально можно показать: включены в настройках и есть тариф с ценой в их валюте."""
+    plans = [p for p in await svc.list_plans() if p.is_active]
+    return {n: p for n, p in active_providers(providers, store).items() if any(pl.price(p.currency) for pl in plans)}
 
 
-@router.callback_query(F.data == "buy")
-async def cb_buy(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
-                 providers: dict[str, PaymentProvider]) -> None:
-    providers = active_providers(providers, store)
+def _discount_text(disc) -> str:
+    if not disc:
+        return ""
+    return (f"\n\n💸 Применена скидка <b>{disc.percent}%</b> по промокоду "
+            f"<code>{escape(disc.code)}</code> — цены уже пересчитаны.")
+
+
+async def _show_methods(cb: CallbackQuery, svc: VPNService, available: dict[str, PaymentProvider]) -> None:
+    disc = await svc.get_discount(cb.from_user.id)
+    b = InlineKeyboardBuilder()
+    for p in available.values():
+        b.button(text=p.title, callback_data=f"buym:{p.name}")
+    b.button(text="⬅️ Меню", callback_data="menu")
+    b.adjust(1)
+    await show(cb, "🛒 <b>Выберите способ оплаты</b>" + _discount_text(disc), b.as_markup())
+
+
+async def _show_plans(cb: CallbackQuery, svc: VPNService, store: SettingsStore, provider: PaymentProvider,
+                      back: str) -> None:
     disc = await svc.get_discount(cb.from_user.id)
     percent = disc.percent if disc else 0
     b = InlineKeyboardBuilder()
     shown = 0
     for plan in await svc.list_plans():
-        label = _price_label(plan, providers, percent)
-        if label:
-            b.button(text=f"{plan.title} — {label}", callback_data=f"plan:{plan.id}")
+        amount = plan.price(provider.currency)
+        if amount:
+            price = provider.format_price(apply_discount(amount, percent) if percent else amount)
+            b.button(text=f"{plan.title} — {price}", callback_data=f"pay:{plan.id}:{provider.name}")
             shown += 1
     if store.get("promo_enabled"):
         b.button(text="🎟 Ввести промокод", callback_data="promo")
-    b.button(text="⬅️ Меню", callback_data="menu")
+    b.button(text="⬅️ Назад" if back == "buy" else "⬅️ Меню", callback_data=back)
     b.adjust(1)
-    text = "🛒 <b>Выберите тариф</b>" if shown else "Тарифы пока не настроены. Загляните позже."
-    if disc and shown:
-        text += (
-            f"\n\n💸 Применена скидка <b>{disc.percent}%</b> по промокоду "
-            f"<code>{escape(disc.code)}</code> — цены уже пересчитаны."
-        )
-    await show(cb, text, b.as_markup())
+    text = f"🛒 <b>Выберите тариф</b>\nОплата: {provider.title}" if shown else "Тарифы пока не настроены. Загляните позже."
+    await show(cb, text + (_discount_text(disc) if shown else ""), b.as_markup())
+
+
+@router.callback_query(F.data == "buy")
+async def cb_buy(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
+                 providers: dict[str, PaymentProvider]) -> None:
+    available = await _priced_providers(svc, store, providers)
+    if not available:
+        b = InlineKeyboardBuilder()
+        if store.get("promo_enabled"):
+            b.button(text="🎟 Ввести промокод", callback_data="promo")
+        b.button(text="⬅️ Меню", callback_data="menu")
+        b.adjust(1)
+        await show(cb, "Тарифы пока не настроены. Загляните позже.", b.as_markup())
+        return
+    if len(available) == 1:     # один настроенный способ — сразу тарифы
+        await _show_plans(cb, svc, store, next(iter(available.values())), back="menu")
+        return
+    await _show_methods(cb, svc, available)
+
+
+@router.callback_query(F.data.startswith("buym:"))
+async def cb_method(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
+                    providers: dict[str, PaymentProvider]) -> None:
+    available = await _priced_providers(svc, store, providers)
+    provider = available.get(cb.data.split(":", 1)[1])
+    if not provider:
+        await cb.answer("Способ оплаты недоступен", show_alert=True)
+        return
+    await _show_plans(cb, svc, store, provider, back="buy")
 
 
 async def _start_payment(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
-                         provider: PaymentProvider, plan, amount: int) -> None:
+                         provider: PaymentProvider, plan, amount: int, option: str | None = None) -> None:
     desc = store.get("invoice_description").replace("{days}", str(plan.days))
     disc = await svc.get_discount(cb.from_user.id)
     if disc:
         await provider.start(
             bot, cb.message.chat.id, plan, apply_discount(amount, disc.percent),
-            redemption_id=disc.redemption_id, discount=disc.percent, description=desc,
+            redemption_id=disc.redemption_id, discount=disc.percent, description=desc, option=option,
         )
     else:
-        await provider.start(bot, cb.message.chat.id, plan, amount, description=desc)
+        await provider.start(bot, cb.message.chat.id, plan, amount, description=desc, option=option)
 
 
 @router.callback_query(F.data.startswith("plan:"))
 async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
                   providers: dict[str, PaymentProvider]) -> None:
+    """Совместимость со старыми сообщениями: выбор способа оплаты уже для выбранного тарифа."""
     providers = active_providers(providers, store)
     plan = await svc.get_plan(int(cb.data.split(":")[1]))
     if not plan or not plan.is_active:
@@ -231,10 +270,9 @@ async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsS
     if not options:
         await cb.answer("Для этого тарифа нет способов оплаты", show_alert=True)
         return
-    if len(options) == 1:  # один способ оплаты — сразу счёт
+    if len(options) == 1:
         await cb.answer()
-        provider, amount = options[0]
-        await _start_payment(cb, bot, svc, store, provider, plan, amount)
+        await _pay(cb, bot, svc, store, options[0][0], plan, options[0][1], None)
         return
     disc = await svc.get_discount(cb.from_user.id)
     b = InlineKeyboardBuilder()
@@ -246,19 +284,47 @@ async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsS
     await show(cb, f"Способ оплаты для «{escape(plan.title)}»:", b.as_markup())
 
 
+async def _pay(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore, provider: PaymentProvider,
+               plan, amount: int, option: str | None) -> None:
+    """Если у способа есть подвыбор (монета/сеть) и он ещё не сделан — показать его, иначе выставить счёт."""
+    opts = provider.options()
+    if opts and option is None:
+        disc = await svc.get_discount(cb.from_user.id)
+        shown = apply_discount(amount, disc.percent) if disc else amount
+        b = InlineKeyboardBuilder()
+        for code, label in opts:
+            b.button(text=label, callback_data=f"pay:{plan.id}:{provider.name}:{code}")
+        b.button(text="⬅️ Назад", callback_data=f"buym:{provider.name}")
+        b.adjust(1)
+        await show(
+            cb,
+            f"{provider.title}\nТариф «{escape(plan.title)}» — {provider.format_price(shown)}\n\n"
+            "Выберите монету и сеть. У сетей разная комиссия за перевод: она добавляется к сумме и "
+            "для небольших тарифов может заметно её увеличить, поэтому первой стоит самая выгодная.",
+            b.as_markup(),
+        )
+        return
+    await _start_payment(cb, bot, svc, store, provider, plan, amount, option)
+
+
 @router.callback_query(F.data.startswith("pay:"))
 async def cb_pay(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
                  providers: dict[str, PaymentProvider]) -> None:
     providers = active_providers(providers, store)
-    _, plan_id, provider_name = cb.data.split(":")
+    parts = cb.data.split(":")
+    plan_id, provider_name = parts[1], parts[2]
+    option = parts[3] if len(parts) > 3 else None
     plan = await svc.get_plan(int(plan_id))
     provider = providers.get(provider_name)
     amount = plan.price(provider.currency) if plan and provider else None
     if not plan or not plan.is_active or not provider or not amount:
         await cb.answer("Недоступно", show_alert=True)
         return
+    if option is not None and option not in dict(provider.options()):
+        await cb.answer("Эта монета недоступна", show_alert=True)
+        return
     await cb.answer()
-    await _start_payment(cb, bot, svc, store, provider, plan, amount)
+    await _pay(cb, bot, svc, store, provider, plan, amount, option)
 
 
 # ---------------------------------------------------------------- аккаунт (статус + ссылка + действия)

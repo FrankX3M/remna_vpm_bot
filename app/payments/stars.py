@@ -19,7 +19,7 @@ class StarsProvider(PaymentProvider):
 
     async def start(
         self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
-        description: str | None = None,
+        description: str | None = None, option: str | None = None,
     ) -> None:
         note = f" (скидка {discount}%)" if discount else ""
         text = (description or f"Подписка VPN на {plan.days} дн.")

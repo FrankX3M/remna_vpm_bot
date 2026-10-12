@@ -137,7 +137,7 @@ if [[ "$(realpath "$SRC_DIR")" != "$(realpath "$APP_DIR")" ]]; then
   # код обновляем целиком, но .env, data/ и egress/config.json (секреты и состояние) не трогаем
   rm -rf "$APP_DIR/app" "$APP_DIR/tools"
   cp -a "$SRC_DIR/app" "$SRC_DIR/tools" "$APP_DIR/"
-  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_bot.py test_trybit.py test_trybit_core.py test_egress.py 07-bot-home.sh; do
+  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_bot.py test_trybit.py test_trybit_core.py test_pay_menu.py test_egress.py 07-bot-home.sh; do
     [[ -f "$SRC_DIR/$f" ]] && cp -a "$SRC_DIR/$f" "$APP_DIR/$f"
   done
   find "$APP_DIR" -name __pycache__ -type d -prune -exec rm -rf {} +

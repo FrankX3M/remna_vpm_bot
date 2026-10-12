@@ -164,11 +164,13 @@ class TrybitClient:
         return data.get("result")
 
     async def create_invoice(self, order_id: str, amount: Decimal, currency: str = "RUB",
-                             email: Optional[str] = None) -> Invoice:
+                             email: Optional[str] = None, cryptocurrency: Optional[str] = None) -> Invoice:
         ttl = self.cfg.invoice_ttl_minutes
         add_fields: dict = {"time_to_pay": {"hours": ttl // 60, "minutes": ttl % 60}}
         if self.cfg.available_currencies:
             add_fields["available_currencies"] = list(self.cfg.available_currencies)
+        if cryptocurrency:
+            add_fields["cryptocurrency"] = cryptocurrency   # монета/сеть, выбранная в боте (напр. USDT_TON)
         body: dict = {"shop_id": self.cfg.shop_id, "amount": float(amount), "currency": currency.upper(),
                       "order_id": order_id, "add_fields": add_fields}
         if email:
@@ -201,9 +203,10 @@ class TrybitService:
         self.cfg, self.store = cfg, store
         self.client = TrybitClient(cfg, http_post)
 
-    async def start_payment(self, order_id: str, amount: Decimal, currency: str = "RUB") -> str:
+    async def start_payment(self, order_id: str, amount: Decimal, currency: str = "RUB",
+                            cryptocurrency: Optional[str] = None) -> str:
         """Создать счёт для платежа бота и вернуть ссылку на оплату (кнопка «Оплатить»)."""
-        inv = await self.client.create_invoice(order_id, amount, currency)
+        inv = await self.client.create_invoice(order_id, amount, currency, cryptocurrency=cryptocurrency)
         await self.store.set_invoice(order_id, inv.uuid, inv.link)
         return inv.link
 

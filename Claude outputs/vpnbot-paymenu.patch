@@ -1,0 +1,599 @@
+diff --git a/.env.example b/.env.example
+index 2ede216..dbd9b3c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -48,7 +48,8 @@ TRYBIT_SHOP_ID=
+ TRYBIT_SECRET_KEY=
+ # Срок жизни счёта, минут
+ TRYBIT_INVOICE_MINUTES=60
+-# Разрешённые монеты/сети через запятую (пусто = все), напр.: USDT_TRC20,USDT_TON,TON
++# Монеты/сети через запятую (пусто = все, выбор на странице Trybit). Заданные показываются в боте кнопками,
++# дешёвые сети первыми (USDT_TON, TON, USDT_SOL, USDT_BSC, LTC, USDT_TRC20, BTC, ETH, USDT_ERC20). Рекомендуется: USDT_TON,TON
+ TRYBIT_CURRENCIES=
+ # true — принимать ТЕСТОВЫЕ счета («Подтвердить счёт без оплаты» в кабинете). Только на время проверки Trybit, затем false!
+ TRYBIT_ALLOW_TEST=false
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..7c76b92
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++__pycache__/
++*.pyc
++*.zip
+diff --git a/07-bot-home.sh b/07-bot-home.sh
+index f316713..efa7966 100644
+--- a/07-bot-home.sh
++++ b/07-bot-home.sh
+@@ -137,7 +137,7 @@ if [[ "$(realpath "$SRC_DIR")" != "$(realpath "$APP_DIR")" ]]; then
+   # код обновляем целиком, но .env, data/ и egress/config.json (секреты и состояние) не трогаем
+   rm -rf "$APP_DIR/app" "$APP_DIR/tools"
+   cp -a "$SRC_DIR/app" "$SRC_DIR/tools" "$APP_DIR/"
+-  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_bot.py test_trybit.py test_trybit_core.py test_egress.py 07-bot-home.sh; do
++  for f in Dockerfile .dockerignore alembic.ini docker-compose.yml requirements.txt .env.example README.md smoke_test.py test_web.py test_bot.py test_trybit.py test_trybit_core.py test_pay_menu.py test_egress.py 07-bot-home.sh; do
+     [[ -f "$SRC_DIR/$f" ]] && cp -a "$SRC_DIR/$f" "$APP_DIR/$f"
+   done
+   find "$APP_DIR" -name __pycache__ -type d -prune -exec rm -rf {} +
+diff --git a/README.md b/README.md
+index 7dde7c3..d1616a3 100644
+--- a/README.md
++++ b/README.md
+@@ -103,11 +103,15 @@ docker-compose.yml   vpnbot (+ tg-egress по профилю egress)
+ `paid`/`overpaid` выдают подписку, `partial` — только уведомление админу и пользователю, `canceled` закрывает заказ. Если панель лежит —
+ платёж остаётся `granted=False` (`/pending`, `/regrant`). Тестовые счета игнорируются, пока `TRYBIT_ALLOW_TEST=false`.
+ Для приёма POSTBACK должна быть включена веб-часть (`WEB_ENABLED=true`); без неё платежи подхватит только сверка (раз в минуту).
+-Тесты: `python test_trybit_core.py` (подпись и логика), `python test_trybit.py` (всё вместе на БД; `TEST_DATABASE_URL` — PostgreSQL).
++**Выбор оплаты в боте.** «Купить» → способ оплаты (показываются только включённые в «Настройки → Оплата» и имеющие цену хотя бы у одного тарифа;
++один способ — шаг пропускается) → тариф → для крипты выбор монеты/сети из `TRYBIT_CURRENCIES` (дешёвые сети первыми; монета уходит в
++Trybit как `add_fields.cryptocurrency`). Новый способ (карты) подключается классом `PaymentProvider` + регистрацией в `main.py` — в меню он появится сам,
++когда включён и у тарифов есть цена в его валюте (`options()` у провайдера — необязательный подвыбор вроде монеты).
++Тесты: `python test_trybit_core.py` (подпись и логика), `python test_pay_menu.py` (меню выбора оплаты), `python test_trybit.py` (всё вместе на БД; `TEST_DATABASE_URL` — PostgreSQL).
+ 
+ ## Важно знать
+ - Клиент панели писан под Remnawave 2.x (в `06-panel-home.sh` тег `remnawave/backend:2`). При другой версии правьте только `app/remnawave.py`.
+-- Схема БД: PostgreSQL — миграции Alembic при старте (`app/migrations`, сейчас 0001, 0002 — Trybit); SQLite (тесты) — `create_all`.
++- Схема БД: PostgreSQL — миграции Alembic при старте (`app/migrations`, сейчас 0001, 0002 — Trybit, 0003 — монета заказа); SQLite (тесты) — `create_all`.
+ - Блокировки на пользователя работают внутри одного процесса: запускайте один экземпляр бота.
+ - Возвраты Stars: `telegram_payment_charge_id` хранится в `payments.external_id`.
+ - Режим direct зависит от VPN на роутере (включите kill-switch); режим egress — от доступности FIN. Без выхода к Telegram бот недоступен. Платежи не теряются: Stars-оплата проходит на стороне
+diff --git a/app/db.py b/app/db.py
+index 61adb5a..5316d2f 100644
+--- a/app/db.py
++++ b/app/db.py
+@@ -103,6 +103,7 @@ class TrybitOrder(Base):
+     currency: Mapped[str] = mapped_column(String(8))
+     invoice_uuid: Mapped[str | None] = mapped_column(String(32), unique=True)   # INV-XXXXXXXX
+     link: Mapped[str | None] = mapped_column(String(255))
++    coin: Mapped[str | None] = mapped_column(String(24))        # монета/сеть, выбранная в боте (USDT_TON ...)
+     # pending | paid | canceled (истёк/отменён) | error (оплачен, но не обработан — разбирает админ)
+     status: Mapped[str] = mapped_column(String(12), default="pending")
+     partial_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+diff --git a/app/handlers/user.py b/app/handlers/user.py
+index e299859..627a68f 100644
+--- a/app/handlers/user.py
++++ b/app/handlers/user.py
+@@ -171,57 +171,96 @@ async def cb_trial(cb: CallbackQuery, svc: VPNService, store: SettingsStore) ->
+ 
+ # ---------------------------------------------------------------- покупка
+ 
+-def _price_label(plan, providers: dict[str, PaymentProvider], percent: int = 0) -> str:
+-    parts = []
+-    for p in providers.values():
+-        amount = plan.price(p.currency)
+-        if amount:
+-            parts.append(p.format_price(apply_discount(amount, percent) if percent else amount))
+-    return " / ".join(parts)
++async def _priced_providers(svc: VPNService, store: SettingsStore,
++                            providers: dict[str, PaymentProvider]) -> dict[str, PaymentProvider]:
++    """Способы оплаты, которые реально можно показать: включены в настройках и есть тариф с ценой в их валюте."""
++    plans = [p for p in await svc.list_plans() if p.is_active]
++    return {n: p for n, p in active_providers(providers, store).items() if any(pl.price(p.currency) for pl in plans)}
+ 
+ 
+-@router.callback_query(F.data == "buy")
+-async def cb_buy(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
+-                 providers: dict[str, PaymentProvider]) -> None:
+-    providers = active_providers(providers, store)
++def _discount_text(disc) -> str:
++    if not disc:
++        return ""
++    return (f"\n\n💸 Применена скидка <b>{disc.percent}%</b> по промокоду "
++            f"<code>{escape(disc.code)}</code> — цены уже пересчитаны.")
++
++
++async def _show_methods(cb: CallbackQuery, svc: VPNService, available: dict[str, PaymentProvider]) -> None:
++    disc = await svc.get_discount(cb.from_user.id)
++    b = InlineKeyboardBuilder()
++    for p in available.values():
++        b.button(text=p.title, callback_data=f"buym:{p.name}")
++    b.button(text="⬅️ Меню", callback_data="menu")
++    b.adjust(1)
++    await show(cb, "🛒 <b>Выберите способ оплаты</b>" + _discount_text(disc), b.as_markup())
++
++
++async def _show_plans(cb: CallbackQuery, svc: VPNService, store: SettingsStore, provider: PaymentProvider,
++                      back: str) -> None:
+     disc = await svc.get_discount(cb.from_user.id)
+     percent = disc.percent if disc else 0
+     b = InlineKeyboardBuilder()
+     shown = 0
+     for plan in await svc.list_plans():
+-        label = _price_label(plan, providers, percent)
+-        if label:
+-            b.button(text=f"{plan.title} — {label}", callback_data=f"plan:{plan.id}")
++        amount = plan.price(provider.currency)
++        if amount:
++            price = provider.format_price(apply_discount(amount, percent) if percent else amount)
++            b.button(text=f"{plan.title} — {price}", callback_data=f"pay:{plan.id}:{provider.name}")
+             shown += 1
+     if store.get("promo_enabled"):
+         b.button(text="🎟 Ввести промокод", callback_data="promo")
+-    b.button(text="⬅️ Меню", callback_data="menu")
++    b.button(text="⬅️ Назад" if back == "buy" else "⬅️ Меню", callback_data=back)
+     b.adjust(1)
+-    text = "🛒 <b>Выберите тариф</b>" if shown else "Тарифы пока не настроены. Загляните позже."
+-    if disc and shown:
+-        text += (
+-            f"\n\n💸 Применена скидка <b>{disc.percent}%</b> по промокоду "
+-            f"<code>{escape(disc.code)}</code> — цены уже пересчитаны."
+-        )
+-    await show(cb, text, b.as_markup())
++    text = f"🛒 <b>Выберите тариф</b>\nОплата: {provider.title}" if shown else "Тарифы пока не настроены. Загляните позже."
++    await show(cb, text + (_discount_text(disc) if shown else ""), b.as_markup())
++
++
++@router.callback_query(F.data == "buy")
++async def cb_buy(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
++                 providers: dict[str, PaymentProvider]) -> None:
++    available = await _priced_providers(svc, store, providers)
++    if not available:
++        b = InlineKeyboardBuilder()
++        if store.get("promo_enabled"):
++            b.button(text="🎟 Ввести промокод", callback_data="promo")
++        b.button(text="⬅️ Меню", callback_data="menu")
++        b.adjust(1)
++        await show(cb, "Тарифы пока не настроены. Загляните позже.", b.as_markup())
++        return
++    if len(available) == 1:     # один настроенный способ — сразу тарифы
++        await _show_plans(cb, svc, store, next(iter(available.values())), back="menu")
++        return
++    await _show_methods(cb, svc, available)
++
++
++@router.callback_query(F.data.startswith("buym:"))
++async def cb_method(cb: CallbackQuery, svc: VPNService, store: SettingsStore,
++                    providers: dict[str, PaymentProvider]) -> None:
++    available = await _priced_providers(svc, store, providers)
++    provider = available.get(cb.data.split(":", 1)[1])
++    if not provider:
++        await cb.answer("Способ оплаты недоступен", show_alert=True)
++        return
++    await _show_plans(cb, svc, store, provider, back="buy")
+ 
+ 
+ async def _start_payment(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
+-                         provider: PaymentProvider, plan, amount: int) -> None:
++                         provider: PaymentProvider, plan, amount: int, option: str | None = None) -> None:
+     desc = store.get("invoice_description").replace("{days}", str(plan.days))
+     disc = await svc.get_discount(cb.from_user.id)
+     if disc:
+         await provider.start(
+             bot, cb.message.chat.id, plan, apply_discount(amount, disc.percent),
+-            redemption_id=disc.redemption_id, discount=disc.percent, description=desc,
++            redemption_id=disc.redemption_id, discount=disc.percent, description=desc, option=option,
+         )
+     else:
+-        await provider.start(bot, cb.message.chat.id, plan, amount, description=desc)
++        await provider.start(bot, cb.message.chat.id, plan, amount, description=desc, option=option)
+ 
+ 
+ @router.callback_query(F.data.startswith("plan:"))
+ async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
+                   providers: dict[str, PaymentProvider]) -> None:
++    """Совместимость со старыми сообщениями: выбор способа оплаты уже для выбранного тарифа."""
+     providers = active_providers(providers, store)
+     plan = await svc.get_plan(int(cb.data.split(":")[1]))
+     if not plan or not plan.is_active:
+@@ -231,10 +270,9 @@ async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsS
+     if not options:
+         await cb.answer("Для этого тарифа нет способов оплаты", show_alert=True)
+         return
+-    if len(options) == 1:  # один способ оплаты — сразу счёт
++    if len(options) == 1:
+         await cb.answer()
+-        provider, amount = options[0]
+-        await _start_payment(cb, bot, svc, store, provider, plan, amount)
++        await _pay(cb, bot, svc, store, options[0][0], plan, options[0][1], None)
+         return
+     disc = await svc.get_discount(cb.from_user.id)
+     b = InlineKeyboardBuilder()
+@@ -246,19 +284,47 @@ async def cb_plan(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsS
+     await show(cb, f"Способ оплаты для «{escape(plan.title)}»:", b.as_markup())
+ 
+ 
++async def _pay(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore, provider: PaymentProvider,
++               plan, amount: int, option: str | None) -> None:
++    """Если у способа есть подвыбор (монета/сеть) и он ещё не сделан — показать его, иначе выставить счёт."""
++    opts = provider.options()
++    if opts and option is None:
++        disc = await svc.get_discount(cb.from_user.id)
++        shown = apply_discount(amount, disc.percent) if disc else amount
++        b = InlineKeyboardBuilder()
++        for code, label in opts:
++            b.button(text=label, callback_data=f"pay:{plan.id}:{provider.name}:{code}")
++        b.button(text="⬅️ Назад", callback_data=f"buym:{provider.name}")
++        b.adjust(1)
++        await show(
++            cb,
++            f"{provider.title}\nТариф «{escape(plan.title)}» — {provider.format_price(shown)}\n\n"
++            "Выберите монету и сеть. У сетей разная комиссия за перевод: она добавляется к сумме и "
++            "для небольших тарифов может заметно её увеличить, поэтому первой стоит самая выгодная.",
++            b.as_markup(),
++        )
++        return
++    await _start_payment(cb, bot, svc, store, provider, plan, amount, option)
++
++
+ @router.callback_query(F.data.startswith("pay:"))
+ async def cb_pay(cb: CallbackQuery, bot: Bot, svc: VPNService, store: SettingsStore,
+                  providers: dict[str, PaymentProvider]) -> None:
+     providers = active_providers(providers, store)
+-    _, plan_id, provider_name = cb.data.split(":")
++    parts = cb.data.split(":")
++    plan_id, provider_name = parts[1], parts[2]
++    option = parts[3] if len(parts) > 3 else None
+     plan = await svc.get_plan(int(plan_id))
+     provider = providers.get(provider_name)
+     amount = plan.price(provider.currency) if plan and provider else None
+     if not plan or not plan.is_active or not provider or not amount:
+         await cb.answer("Недоступно", show_alert=True)
+         return
++    if option is not None and option not in dict(provider.options()):
++        await cb.answer("Эта монета недоступна", show_alert=True)
++        return
+     await cb.answer()
+-    await _start_payment(cb, bot, svc, store, provider, plan, amount)
++    await _pay(cb, bot, svc, store, provider, plan, amount, option)
+ 
+ 
+ # ---------------------------------------------------------------- аккаунт (статус + ссылка + действия)
+diff --git a/app/migrations/versions/0003_trybit_coin.py b/app/migrations/versions/0003_trybit_coin.py
+new file mode 100644
+index 0000000..787ae00
+--- /dev/null
++++ b/app/migrations/versions/0003_trybit_coin.py
+@@ -0,0 +1,21 @@
++"""trybit orders: coin
++
++Revision ID: 0003
++Revises: 0002
++Create Date: 2026-10-12 12:00:00
++"""
++from alembic import op
++import sqlalchemy as sa
++
++revision = '0003'
++down_revision = '0002'
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.add_column('trybit_orders', sa.Column('coin', sa.String(length=24), nullable=True))
++
++
++def downgrade() -> None:
++    op.drop_column('trybit_orders', 'coin')
+diff --git a/app/payments/base.py b/app/payments/base.py
+index cb16bcd..3c1fdb3 100644
+--- a/app/payments/base.py
++++ b/app/payments/base.py
+@@ -30,10 +30,15 @@ class PaymentProvider(ABC):
+     def format_price(self, amount: int) -> str:
+         return f"{amount} {self.currency}"
+ 
++    def options(self) -> list[tuple[str, str]]:
++        """Подвыбор внутри способа оплаты: [(код, подпись кнопки)]. Пусто — подвыбора нет (например, у Stars).
++        Выбранный код приходит в start(option=...)."""
++        return []
++
+     @abstractmethod
+     async def start(
+         self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
+-        description: str | None = None,
++        description: str | None = None, option: str | None = None,
+     ) -> None:
+         """Показать пользователю счёт / ссылку на оплату.
+         amount — уже с учётом скидки; redemption_id (активация промокода-скидки) нужно положить в payload через
+diff --git a/app/payments/stars.py b/app/payments/stars.py
+index 8db65a9..0ab24be 100644
+--- a/app/payments/stars.py
++++ b/app/payments/stars.py
+@@ -19,7 +19,7 @@ class StarsProvider(PaymentProvider):
+ 
+     async def start(
+         self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None, discount: int = 0,
+-        description: str | None = None,
++        description: str | None = None, option: str | None = None,
+     ) -> None:
+         note = f" (скидка {discount}%)" if discount else ""
+         text = (description or f"Подписка VPN на {plan.days} дн.")
+diff --git a/app/payments/trybit.py b/app/payments/trybit.py
+index 2d83ced..ec9a6ec 100644
+--- a/app/payments/trybit.py
++++ b/app/payments/trybit.py
+@@ -56,16 +56,18 @@ class TrybitStore:
+ 
+     # ---- заказы
+     async def create_order(self, *, telegram_id: int, chat_id: int, plan_id: int, redemption_id: int | None,
+-                           amount: int, currency: str) -> TrybitOrder:
++                           amount: int, currency: str,
++                           coin: str | None = None) -> TrybitOrder:
+         async with self.sm() as s:
+             order = TrybitOrder(telegram_id=telegram_id, chat_id=chat_id, plan_id=plan_id, redemption_id=redemption_id,
+-                                amount=amount, currency=currency)
++                                amount=amount, currency=currency, coin=coin)
+             s.add(order)
+             await s.commit()
+             return order
+ 
+     async def find_reusable(self, *, telegram_id: int, plan_id: int, redemption_id: int | None, amount: int,
+-                            currency: str, ttl_minutes: int) -> TrybitOrder | None:
++                            currency: str, ttl_minutes: int,
++                            coin: str | None = None) -> TrybitOrder | None:
+         """Тот же счёт повторно (двойной клик, «Купить» ещё раз) — без нового счёта в Trybit."""
+         since = utcnow() - timedelta(minutes=max(1, ttl_minutes - 5))
+         async with self.sm() as s:
+@@ -73,6 +75,7 @@ class TrybitStore:
+                 TrybitOrder.telegram_id == telegram_id, TrybitOrder.plan_id == plan_id, TrybitOrder.amount == amount,
+                 TrybitOrder.currency == currency, TrybitOrder.status == "pending", TrybitOrder.link.is_not(None),
+                 TrybitOrder.created_at > since,
++                (TrybitOrder.coin == coin) if coin else TrybitOrder.coin.is_(None),
+                 (TrybitOrder.redemption_id == redemption_id) if redemption_id else TrybitOrder.redemption_id.is_(None),
+             ).order_by(TrybitOrder.id.desc())
+             return (await s.execute(q)).scalars().first()
+@@ -191,6 +194,21 @@ class TrybitStore:
+         return [self._record(o) for o in rows]
+ 
+ 
++# подписи кнопок выбора монеты; порядок в COIN_ORDER = от дешёвой сети к дорогой (комиссия сети у клиента)
++COIN_LABELS = {
++    "USDT_TON": "USDT · TON (комиссия сети минимальная)",
++    "TON": "TON",
++    "USDT_SOL": "USDT · Solana",
++    "USDT_BSC": "USDT · BNB Chain (BEP20)",
++    "USDT_TRC20": "USDT · TRON (TRC20, дороже)",
++    "BTC": "Bitcoin (BTC)",
++    "LTC": "Litecoin (LTC)",
++    "ETH": "Ethereum (ETH)",
++    "USDT_ERC20": "USDT · Ethereum (ERC20, дорого)",
++}
++COIN_ORDER = ["USDT_TON", "TON", "USDT_SOL", "USDT_BSC", "LTC", "USDT_TRC20", "BTC", "ETH", "USDT_ERC20"]
++
++
+ class TrybitProvider(PaymentProvider):
+     name = PROVIDER
+     currency = "RUB"
+@@ -202,15 +220,23 @@ class TrybitProvider(PaymentProvider):
+     def format_price(self, amount: int) -> str:
+         return f"{amount} ₽"
+ 
++    def options(self) -> list[tuple[str, str]]:
++        """Кнопки выбора монеты: из TRYBIT_CURRENCIES, дешёвые сети первыми. Пусто = выбор на странице Trybit."""
++        codes = [c for c in self.service.cfg.available_currencies if c in COIN_LABELS]
++        codes.sort(key=lambda c: COIN_ORDER.index(c) if c in COIN_ORDER else len(COIN_ORDER))
++        return [(c, COIN_LABELS[c]) for c in codes]
++
+     async def start(self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None,
+-                    discount: int = 0, description: str | None = None) -> None:
++                    discount: int = 0, description: str | None = None, option: str | None = None) -> None:
++        coin = option if option in dict(self.options()) else None
+         order = await self.store.find_reusable(telegram_id=chat_id, plan_id=plan.id, redemption_id=redemption_id,
+-                                               amount=amount, currency=self.currency, ttl_minutes=self.ttl)
++                                               amount=amount, currency=self.currency, ttl_minutes=self.ttl, coin=coin)
+         if order is None:
+             order = await self.store.create_order(telegram_id=chat_id, chat_id=chat_id, plan_id=plan.id,
+-                                                  redemption_id=redemption_id, amount=amount, currency=self.currency)
++                                                  redemption_id=redemption_id, amount=amount, currency=self.currency,
++                                                  coin=coin)
+             try:
+-                await self.service.start_payment(str(order.id), Decimal(amount), self.currency)
++                await self.service.start_payment(str(order.id), Decimal(amount), self.currency, cryptocurrency=coin)
+             except Exception:  # noqa: BLE001
+                 log.exception("Trybit: не удалось создать счёт (заказ %s)", order.id)
+                 await self.store._set_status(order.id, "canceled")
+diff --git a/app/payments/trybit_api.py b/app/payments/trybit_api.py
+index c8d5494..8d8b12a 100644
+--- a/app/payments/trybit_api.py
++++ b/app/payments/trybit_api.py
+@@ -164,11 +164,13 @@ class TrybitClient:
+         return data.get("result")
+ 
+     async def create_invoice(self, order_id: str, amount: Decimal, currency: str = "RUB",
+-                             email: Optional[str] = None) -> Invoice:
++                             email: Optional[str] = None, cryptocurrency: Optional[str] = None) -> Invoice:
+         ttl = self.cfg.invoice_ttl_minutes
+         add_fields: dict = {"time_to_pay": {"hours": ttl // 60, "minutes": ttl % 60}}
+         if self.cfg.available_currencies:
+             add_fields["available_currencies"] = list(self.cfg.available_currencies)
++        if cryptocurrency:
++            add_fields["cryptocurrency"] = cryptocurrency   # монета/сеть, выбранная в боте (напр. USDT_TON)
+         body: dict = {"shop_id": self.cfg.shop_id, "amount": float(amount), "currency": currency.upper(),
+                       "order_id": order_id, "add_fields": add_fields}
+         if email:
+@@ -201,9 +203,10 @@ class TrybitService:
+         self.cfg, self.store = cfg, store
+         self.client = TrybitClient(cfg, http_post)
+ 
+-    async def start_payment(self, order_id: str, amount: Decimal, currency: str = "RUB") -> str:
++    async def start_payment(self, order_id: str, amount: Decimal, currency: str = "RUB",
++                            cryptocurrency: Optional[str] = None) -> str:
+         """Создать счёт для платежа бота и вернуть ссылку на оплату (кнопка «Оплатить»)."""
+-        inv = await self.client.create_invoice(order_id, amount, currency)
++        inv = await self.client.create_invoice(order_id, amount, currency, cryptocurrency=cryptocurrency)
+         await self.store.set_invoice(order_id, inv.uuid, inv.link)
+         return inv.link
+ 
+diff --git a/test_pay_menu.py b/test_pay_menu.py
+new file mode 100644
+index 0000000..89ba9cd
+--- /dev/null
++++ b/test_pay_menu.py
+@@ -0,0 +1,115 @@
++"""Выбор способа оплаты и монеты: python test_pay_menu.py (без сети и Telegram)."""
++import asyncio
++from unittest.mock import AsyncMock
++
++from app.config import Settings
++from app.db import init_db, make_engine
++from app.handlers import user as uh
++from app.payments import trybit
++from app.payments.stars import StarsProvider
++from app.payments.trybit_api import TrybitService
++from app.services import VPNService
++from app.settings_store import SettingsStore
++from smoke_test import FakeRemna
++from test_bot import make_cb, buttons
++
++
++class Bot:
++    def __init__(self):
++        self.sent = []
++
++    async def send_message(self, chat_id, text, reply_markup=None, **kw):
++        self.sent.append((chat_id, text, reply_markup))
++
++    async def send_invoice(self, **kw):
++        self.sent.append(("invoice", kw))
++
++
++class Api:
++    def __init__(self):
++        self.bodies = []
++
++    async def __call__(self, url, headers, body):
++        self.bodies.append(body)
++        n = len(self.bodies)
++        inv = {"uuid": f"INV-T{n:07d}", "status": "created", "link": f"https://pay.trybit.com/T{n:07d}",
++               "amount_in_fiat": body["amount"], "fiat_currency": body["currency"], "test_mode": False}
++        return 200, {"status": "success", "result": inv}
++
++
++async def main():
++    cfg = Settings(bot_token="x", remnawave_url="http://x", remnawave_token="x", admin_ids="1",
++                   trybit_api_key="K", trybit_shop_id="S", trybit_secret_key="s",
++                   trybit_currencies="USDT_TRC20,USDT_TON,TON")
++    engine, sm = make_engine("sqlite+aiosqlite:///:memory:"); await init_db(engine)
++    store = SettingsStore(sm, cfg); await store.load()
++    svc = VPNService(sm, FakeRemna(), cfg, store)
++    bot, api = Bot(), Api()
++    tstore = trybit.TrybitStore(sm, svc, bot, cfg.admin_id_set)
++    tsvc = TrybitService(trybit.make_config(cfg), tstore, api)
++    providers = {"stars": StarsProvider(), "trybit": trybit.TrybitProvider(tsvc, tstore, 60)}
++    await svc.register(10, "u")
++
++    # тарифов нет — способов оплаты нет, экран честно об этом говорит
++    cb, sent = make_cb(10, "buy"); await uh.cb_buy(cb, svc, store, providers)
++    assert "не настроены" in sent["text"]
++    print("✓ нет тарифов — нет способов оплаты")
++
++    plan = await svc.add_plan("1 месяц", 30, 150, "XTR")      # цена только в Stars
++    cb, sent = make_cb(10, "buy"); await uh.cb_buy(cb, svc, store, providers)
++    b = buttons(sent["kb"])
++    assert "способ" not in sent["text"].lower() and ("1 месяц — 150 ⭐", f"pay:{plan.id}:stars") in b, (sent["text"], b)
++    print("✓ настроен один способ (Stars) — сразу тарифы, лишнего шага нет")
++
++    await svc.set_price(plan.id, 150, "RUB")
++    cb, sent = make_cb(10, "buy"); await uh.cb_buy(cb, svc, store, providers)
++    b = buttons(sent["kb"])
++    assert "способ оплаты" in sent["text"] and ("⭐ Telegram Stars", "buym:stars") in b \
++        and ("💎 Криптовалюта (Trybit)", "buym:trybit") in b and not any("карт" in t.lower() for t, _ in b), b
++    print("✓ два способа — первым шагом выбор способа; карт нет, пока не настроены")
++
++    await store.update({"pay_trybit_enabled": False}, "test")
++    cb, sent = make_cb(10, "buy"); await uh.cb_buy(cb, svc, store, providers)
++    assert not any(d == "buym:trybit" for _, d in buttons(sent["kb"]))
++    await store.update({"pay_trybit_enabled": True}, "test")
++    print("✓ выключенный в настройках способ не показывается")
++
++    cb, sent = make_cb(10, "buym:trybit"); await uh.cb_method(cb, svc, store, providers)
++    assert (f"1 месяц — 150 ₽", f"pay:{plan.id}:trybit") in buttons(sent["kb"])
++    cb, sent = make_cb(10, "buym:cards"); await uh.cb_method(cb, svc, store, providers)
++    assert cb.answer.call_args.kwargs.get("show_alert") is True
++    print("✓ тарифы выбранного способа; неизвестный способ отклоняется")
++
++    # крипта: сначала выбор монеты, дешёвая сеть первой, счёт ещё не создан
++    cb, sent = make_cb(10, f"pay:{plan.id}:trybit"); await uh.cb_pay(cb, bot, svc, store, providers)
++    b = buttons(sent["kb"])
++    assert [d for _, d in b][:3] == [f"pay:{plan.id}:trybit:{c}" for c in ("USDT_TON", "TON", "USDT_TRC20")], b
++    assert api.bodies == []
++    print("✓ крипта: выбор монеты, USDT·TON первой, счёт до выбора не создаётся")
++
++    cb, sent = make_cb(10, f"pay:{plan.id}:trybit:USDT_TON"); await uh.cb_pay(cb, bot, svc, store, providers)
++    assert api.bodies[-1]["add_fields"]["cryptocurrency"] == "USDT_TON" and len(api.bodies) == 1
++    cb, sent = make_cb(10, f"pay:{plan.id}:trybit:USDT_TON"); await uh.cb_pay(cb, bot, svc, store, providers)
++    assert len(api.bodies) == 1, "тот же выбор — тот же счёт"
++    cb, sent = make_cb(10, f"pay:{plan.id}:trybit:USDT_TRC20"); await uh.cb_pay(cb, bot, svc, store, providers)
++    assert api.bodies[-1]["add_fields"]["cryptocurrency"] == "USDT_TRC20" and len(api.bodies) == 2
++    cb, sent = make_cb(10, f"pay:{plan.id}:trybit:DOGE"); await uh.cb_pay(cb, bot, svc, store, providers)
++    assert len(api.bodies) == 2 and cb.answer.call_args.kwargs.get("show_alert") is True
++    print("✓ монета уходит в Trybit; счёт переиспользуется только для той же монеты; чужой код отклонён")
++
++    # Stars идёт без подвыбора
++    cb, sent = make_cb(10, f"pay:{plan.id}:stars"); await uh.cb_pay(cb, bot, svc, store, providers)
++    assert bot.sent[-1][0] == "invoice" and bot.sent[-1][1]["currency"] == "XTR"
++    print("✓ Stars: сразу счёт")
++
++    # без списка монет в настройках подвыбора нет — монету выберет клиент на странице Trybit
++    cfg2 = Settings(bot_token="x", remnawave_url="http://x", remnawave_token="x", trybit_api_key="K",
++                    trybit_shop_id="S", trybit_secret_key="s")
++    p2 = trybit.TrybitProvider(TrybitService(trybit.make_config(cfg2), tstore, api), tstore, 60)
++    assert p2.options() == []
++    print("✓ TRYBIT_CURRENCIES пуст — подвыбора нет")
++
++    await engine.dispose()
++    print("\nВыбор оплаты: все проверки пройдены")
++
++asyncio.run(main())
+diff --git a/trybit-acquiring-bot.md b/trybit-acquiring-bot.md
+index e4146be..5f5392b 100644
+--- a/trybit-acquiring-bot.md
++++ b/trybit-acquiring-bot.md
+@@ -17,11 +17,11 @@
+ | Поле | Значение |
+ |---|---|
+ | Способ интеграции | API |
+-| URL успешной оплаты | `https://t.me/<BOT_USERNAME>?start=paid` |
+-| URL неудачной оплаты | `https://t.me/<BOT_USERNAME>?start=pay_failed` |
++| URL успешной оплаты | `https://t.me/<BOT_USERNAME>` (без `?start=`: Trybit дописывает `?order_id=...&invoice_uuid=...`, и параметр start ломается) |
++| URL неудачной оплаты | `https://t.me/<BOT_USERNAME>` |
+ | URL для уведомлений | `https://sub.1rtp.ru/pay/trybit/postback` |
+ 
+-Формат постбэка в проекте Trybit: JSON. Бот на `/start paid` пишет «платёж обрабатывается», на `/start pay_failed` «оплата не прошла».
++Формат постбэка в проекте Trybit: JSON. Подписка выдаётся постбэком/сверкой, а не переходом по ссылке.
+ 
+ ## 3. Что изменено в боте
+ 
+@@ -34,11 +34,21 @@
+ | `app/main.py` | регистрация провайдера, если заданы три ключа; фоновая сверка |
+ | `app/web/server.py` | маршрут `POST /trybit/postback` без сессии и CSRF |
+ | `app/settings_store.py` | переключатель «Настройки → Оплата → Trybit» |
+-| `app/handlers/user.py` | обработка `/start paid` и `/start pay_failed` |
++| `app/handlers/user.py` | меню покупки: способ оплаты → тариф → монета (см. ниже) |
++| `app/migrations/versions/0003_trybit_coin.py` | колонка `trybit_orders.coin` |
++| `test_pay_menu.py` | тесты меню выбора оплаты и монеты |
+ | `07-bot-home.sh`, `README.md`, `deploy/ru-caddy-trybit.snippet` | копирование тестов, подсказки, документация, фрагмент Caddy для VPS RU |
+ 
+ Поток: пользователь выбирает тариф и способ «Криптовалюта (Trybit)» → создаётся заказ и счёт (повторный клик переиспользует тот же счёт) → кнопка со ссылкой на страницу Trybit → POSTBACK → `process_payment(provider="trybit", external_id=<INV-...>)`, то есть те же рефералы, скидки, события и `/regrant`, что и у Stars.
+ 
++## 3.1. Выбор способа оплаты и монеты
++
++«Купить» → **способ оплаты** → тариф → (для крипты) **монета/сеть**. В списке способов только те, что включены в «Настройки → Оплата» и у которых есть цена хотя бы у одного активного тарифа; если способ один, шаг пропускается. Банковские карты появятся сами, когда будет написан провайдер (`PaymentProvider`, регистрация в `main.py`) и заданы цены в его валюте: пока их нет, кнопки нет.
++
++Монеты берутся из `TRYBIT_CURRENCIES`, порядок от дешёвой сети к дорогой: USDT·TON, TON, USDT·Solana, USDT·BEP20, LTC, USDT·TRC20, BTC, ETH, USDT·ERC20. Выбранная монета уходит в Trybit как `add_fields.cryptocurrency`, хранится в заказе (`coin`), счёт переиспользуется только для той же монеты. Пустой `TRYBIT_CURRENCIES` = подвыбора нет, монету выбирает клиент на странице Trybit. Рекомендуется `TRYBIT_CURRENCIES=USDT_TON,TON`.
++
++Почему TON первым: сетевая комиссия платит клиент (`side_commission: client`). На тестовом счёте за 150 ₽ (≈1,76 USDT) в TRC20 она ≈1,4 USDT, в TON ≈0,2 USDT. Режим «комиссию платит мерчант» включать нельзя, пока в кабинете нельзя отключить TRC20 (у USDT TRC20/ERC20/USDC ERC20/USDT BSC в кабинете замочки): на малых тарифах это уводит в минус. В тестовом режиме API всегда отвечает USDT_TRC20, реальное поведение `cryptocurrency` видно только на первом боевом платеже.
++
+ ## 4. Безопасность
+ 
+ * Постбэк без валидного JWT (HS256, SECRET KEY, обязательный `exp`) получает 401. В примерах Trybit токен необязателен, здесь это закрыто.

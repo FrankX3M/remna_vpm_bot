@@ -56,16 +56,18 @@ class TrybitStore:
 
     # ---- заказы
     async def create_order(self, *, telegram_id: int, chat_id: int, plan_id: int, redemption_id: int | None,
-                           amount: int, currency: str) -> TrybitOrder:
+                           amount: int, currency: str,
+                           coin: str | None = None) -> TrybitOrder:
         async with self.sm() as s:
             order = TrybitOrder(telegram_id=telegram_id, chat_id=chat_id, plan_id=plan_id, redemption_id=redemption_id,
-                                amount=amount, currency=currency)
+                                amount=amount, currency=currency, coin=coin)
             s.add(order)
             await s.commit()
             return order
 
     async def find_reusable(self, *, telegram_id: int, plan_id: int, redemption_id: int | None, amount: int,
-                            currency: str, ttl_minutes: int) -> TrybitOrder | None:
+                            currency: str, ttl_minutes: int,
+                            coin: str | None = None) -> TrybitOrder | None:
         """Тот же счёт повторно (двойной клик, «Купить» ещё раз) — без нового счёта в Trybit."""
         since = utcnow() - timedelta(minutes=max(1, ttl_minutes - 5))
         async with self.sm() as s:
@@ -73,6 +75,7 @@ class TrybitStore:
                 TrybitOrder.telegram_id == telegram_id, TrybitOrder.plan_id == plan_id, TrybitOrder.amount == amount,
                 TrybitOrder.currency == currency, TrybitOrder.status == "pending", TrybitOrder.link.is_not(None),
                 TrybitOrder.created_at > since,
+                (TrybitOrder.coin == coin) if coin else TrybitOrder.coin.is_(None),
                 (TrybitOrder.redemption_id == redemption_id) if redemption_id else TrybitOrder.redemption_id.is_(None),
             ).order_by(TrybitOrder.id.desc())
             return (await s.execute(q)).scalars().first()
@@ -191,6 +194,21 @@ class TrybitStore:
         return [self._record(o) for o in rows]
 
 
+# подписи кнопок выбора монеты; порядок в COIN_ORDER = от дешёвой сети к дорогой (комиссия сети у клиента)
+COIN_LABELS = {
+    "USDT_TON": "USDT · TON (комиссия сети минимальная)",
+    "TON": "TON",
+    "USDT_SOL": "USDT · Solana",
+    "USDT_BSC": "USDT · BNB Chain (BEP20)",
+    "USDT_TRC20": "USDT · TRON (TRC20, дороже)",
+    "BTC": "Bitcoin (BTC)",
+    "LTC": "Litecoin (LTC)",
+    "ETH": "Ethereum (ETH)",
+    "USDT_ERC20": "USDT · Ethereum (ERC20, дорого)",
+}
+COIN_ORDER = ["USDT_TON", "TON", "USDT_SOL", "USDT_BSC", "LTC", "USDT_TRC20", "BTC", "ETH", "USDT_ERC20"]
+
+
 class TrybitProvider(PaymentProvider):
     name = PROVIDER
     currency = "RUB"
@@ -202,15 +220,23 @@ class TrybitProvider(PaymentProvider):
     def format_price(self, amount: int) -> str:
         return f"{amount} ₽"
 
+    def options(self) -> list[tuple[str, str]]:
+        """Кнопки выбора монеты: из TRYBIT_CURRENCIES, дешёвые сети первыми. Пусто = выбор на странице Trybit."""
+        codes = [c for c in self.service.cfg.available_currencies if c in COIN_LABELS]
+        codes.sort(key=lambda c: COIN_ORDER.index(c) if c in COIN_ORDER else len(COIN_ORDER))
+        return [(c, COIN_LABELS[c]) for c in codes]
+
     async def start(self, bot: Bot, chat_id: int, plan: Plan, amount: int, *, redemption_id: int | None = None,
-                    discount: int = 0, description: str | None = None) -> None:
+                    discount: int = 0, description: str | None = None, option: str | None = None) -> None:
+        coin = option if option in dict(self.options()) else None
         order = await self.store.find_reusable(telegram_id=chat_id, plan_id=plan.id, redemption_id=redemption_id,
-                                               amount=amount, currency=self.currency, ttl_minutes=self.ttl)
+                                               amount=amount, currency=self.currency, ttl_minutes=self.ttl, coin=coin)
         if order is None:
             order = await self.store.create_order(telegram_id=chat_id, chat_id=chat_id, plan_id=plan.id,
-                                                  redemption_id=redemption_id, amount=amount, currency=self.currency)
+                                                  redemption_id=redemption_id, amount=amount, currency=self.currency,
+                                                  coin=coin)
             try:
-                await self.service.start_payment(str(order.id), Decimal(amount), self.currency)
+                await self.service.start_payment(str(order.id), Decimal(amount), self.currency, cryptocurrency=coin)
             except Exception:  # noqa: BLE001
                 log.exception("Trybit: не удалось создать счёт (заказ %s)", order.id)
                 await self.store._set_status(order.id, "canceled")

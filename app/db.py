@@ -103,6 +103,7 @@ class TrybitOrder(Base):
     currency: Mapped[str] = mapped_column(String(8))
     invoice_uuid: Mapped[str | None] = mapped_column(String(32), unique=True)   # INV-XXXXXXXX
     link: Mapped[str | None] = mapped_column(String(255))
+    coin: Mapped[str | None] = mapped_column(String(24))        # монета/сеть, выбранная в боте (USDT_TON ...)
     # pending | paid | canceled (истёк/отменён) | error (оплачен, но не обработан — разбирает админ)
     status: Mapped[str] = mapped_column(String(12), default="pending")
     partial_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
